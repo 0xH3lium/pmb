@@ -1,0 +1,20 @@
+[project]
+name = "mcmc-pmb"
+version = "0.1.0"
+description = "MCMC workflow for probabilistic material balance analysis"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+	"numpy",
+	"pandas",
+	"scipy",
+	"matplotlib",
+	"seaborn",
+]
+
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
