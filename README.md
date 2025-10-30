@@ -3,7 +3,7 @@
 This project implements a complete, reproducible workflow for sampling the posterior distribution of original oil in place (`N`) and gas-cap ratio (`m`) using the Metropolis–Hastings algorithm. The implementation follows the practical guide outlined in the project brief and includes:
 
 - a bivariate normal prior informed by volumetric analysis,
-- a physics-based forward material-balance model that solves the implicit MBE at each time step,
+- a physics-inspired forward material-balance model with configurable gas-cap and water-drive support,
 - a Gaussian likelihood comparing predicted and measured pressures,
 - an efficient Metropolis–Hastings sampler with burn-in and thinning support,
 - diagnostic plots and summary statistics for downstream interpretation,

@@ -55,12 +55,29 @@ class MaterialBalancePVT:
 
 
 @dataclass(frozen=True)
+class WaterDriveModel:
+    """Simple empirical representation of water-drive support."""
+
+    strength: float = 0.0
+    exponent: float = 1.1
+    max_support_fraction: float = 0.9
+
+    def support_fraction(self, depletion_fraction: float) -> float:
+        """Return the fractional pressure support provided by the aquifer."""
+
+        depletion_fraction = float(np.clip(depletion_fraction, 0.0, 1.0))
+        raw_support = self.strength * depletion_fraction**self.exponent
+        return float(np.clip(raw_support, 0.0, self.max_support_fraction))
+
+
+@dataclass(frozen=True)
 class MaterialBalanceModel:
     """Forward solver that predicts pressure history for a given (N, m)."""
 
     pvt: MaterialBalancePVT
     pressure_bounds: Tuple[float, float] = (200.0, 5000.0)
     drive_scale: float = 1.1  # empirical factor controlling depletion strength
+    water_drive: Optional[WaterDriveModel] = None
 
     def _residual(self, pressure: float, N: float, m: float, Np: float, Rp: float) -> float:
         """Residual between trial pressure and analytic depletion model."""
@@ -80,6 +97,9 @@ class MaterialBalanceModel:
         gas_drive_term = np.clip(Rp - rs_initial, 0.0, None) / max(rs_initial, 1e-6)
 
         effective_drive = fraction_depleted * (1.0 + 0.6 * m) + 0.4 * m * gas_drive_term
+        if self.water_drive is not None and self.water_drive.strength > 0.0:
+            support = self.water_drive.support_fraction(float(np.clip(fraction_depleted, 0.0, 1.0)))
+            effective_drive = max(effective_drive - support, 1e-6)
         exponent = -effective_drive / max(self.drive_scale, 1e-6)
 
         pressure = initial_pressure * np.exp(exponent)
@@ -123,4 +143,4 @@ class MaterialBalanceModel:
         return np.asarray(pressures, dtype=float)
 
 
-__all__ = ["MaterialBalanceModel", "MaterialBalancePVT"]
+__all__ = ["MaterialBalanceModel", "MaterialBalancePVT", "WaterDriveModel"]

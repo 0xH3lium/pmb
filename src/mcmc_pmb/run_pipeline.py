@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from .analysis import make_diagnostics, summarize_chain
-from .forward_model import MaterialBalanceModel, MaterialBalancePVT
+from .forward_model import MaterialBalanceModel, MaterialBalancePVT, WaterDriveModel
 from .mcmc import MetropolisHastingsConfig, run_metropolis_hastings
 from .priors import PriorParameters, build_prior_distribution
 from .synthetic import generate_synthetic_dataset
@@ -30,12 +30,13 @@ def main() -> None:
         mean_m=0.4,
         std_N=35.0,
         std_m=0.13,
-        correlation=-0.6,
+        correlation=-0.1,
     )
     prior_dist = build_prior_distribution(hyperparameters)
 
     pvt = MaterialBalancePVT()
-    model = MaterialBalanceModel(pvt=pvt)
+    water_drive = WaterDriveModel(strength=0.4, exponent=1.2, max_support_fraction=0.75)
+    model = MaterialBalanceModel(pvt=pvt, water_drive=water_drive)
     pressure_uncertainty = 10.0
 
     config = MetropolisHastingsConfig(
