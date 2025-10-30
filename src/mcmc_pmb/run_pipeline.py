@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .analysis import make_diagnostics, summarize_chain
+from .analysis import estimate_map, make_diagnostics, summarize_chain
 from .forward_model import MaterialBalanceModel, MaterialBalancePVT, WaterDriveModel
 from .mcmc import MetropolisHastingsConfig, run_metropolis_hastings
 from .priors import PriorParameters, build_prior_distribution
@@ -35,9 +35,10 @@ def main() -> None:
     prior_dist = build_prior_distribution(hyperparameters)
 
     pvt = MaterialBalancePVT()
-    water_drive = WaterDriveModel(strength=0.4, exponent=1.2, max_support_fraction=0.75)
+    water_drive = WaterDriveModel(strength=0.0, exponent=1.2, max_support_fraction=0.75)
     model = MaterialBalanceModel(pvt=pvt, water_drive=water_drive)
-    pressure_uncertainty = 10.0
+    
+    pressure_uncertainty = 100.0
 
     config = MetropolisHastingsConfig(
         n_iterations=60000,
@@ -58,16 +59,24 @@ def main() -> None:
 
     outputs_dir.mkdir(parents=True, exist_ok=True)
     chain = result.chain
+    log_posteriors = result.log_posteriors_chain
+    map_estimate = estimate_map(chain, log_posteriors)
 
     np.savetxt(outputs_dir / "posterior_samples.csv", chain, delimiter=",", header="N,m", comments="")
 
-    summary_table = summarize_chain(chain)
+    summary_table = summarize_chain(chain, map_estimate=map_estimate)
     summary_table.to_csv(outputs_dir / "posterior_summary.csv", index=False)
 
-    make_diagnostics(chain, outputs_dir)
+    make_diagnostics(
+        chain,
+        outputs_dir,
+        log_posteriors=log_posteriors,
+        map_estimate=map_estimate,
+    )
 
     print("Acceptance rate:", f"{result.acceptance_rate:.3f}")
     print("Posterior summary:\n", summary_table)
+    print("MAP estimate (N, m):", tuple(f"{value:.3f}" for value in map_estimate))
 
 
 if __name__ == "__main__":

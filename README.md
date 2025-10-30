@@ -22,9 +22,7 @@ main.py                 # Convenience entry point that calls the end-to-end pipe
 
 Create and activate the virtual environment (already configured for this workspace) and install the project in editable mode if desired:
 
-```bash
-pip install -e .
-```
+- This project uses uv from package management and virtual env !
 
 Run the full pipeline, which will generate synthetic production data when no field data are present, execute the MCMC sampler, and produce diagnostics in `outputs/`:
 

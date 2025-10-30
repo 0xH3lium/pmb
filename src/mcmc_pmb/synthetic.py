@@ -15,9 +15,9 @@ def generate_synthetic_dataset(
     output_csv: Optional[Path] = None,
     n_steps: int = 24,
     true_parameters: tuple[float, float] = (110.0, 0.35),
-    measurement_noise: float = 10.0,
-    random_seed: int = 2025,
-    water_drive_strength: float = 0.35,
+    measurement_noise: float = 100.0,
+    random_seed: int = 2026,
+    water_drive_strength: float = 0.0,
 ) -> pd.DataFrame:
     """Generate a synthetic production history with noisy pressure data."""
 

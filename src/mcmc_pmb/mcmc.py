@@ -54,6 +54,13 @@ class MetropolisHastingsResult:
             post_burn = post_burn[:: self.thinning]
         return post_burn
 
+    @property
+    def log_posteriors_chain(self) -> np.ndarray:
+        post_burn = self.log_posteriors[self.burn_in :]
+        if self.thinning > 1:
+            post_burn = post_burn[:: self.thinning]
+        return post_burn
+
 
 def run_metropolis_hastings(
     config: MetropolisHastingsConfig,
