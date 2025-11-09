@@ -8,9 +8,10 @@ import numpy as np
 import pandas as pd
 
 from .analysis import estimate_map, make_diagnostics, summarize_chain
-from .forward_model import MaterialBalanceModel, MaterialBalancePVT, WaterDriveModel
+from .forward_model import MaterialBalanceModel
 from .mcmc import MetropolisHastingsConfig, run_metropolis_hastings
 from .priors import PriorParameters, build_prior_distribution
+from .pvt import MaterialBalancePVT
 from .synthetic import generate_synthetic_dataset
 
 
@@ -35,15 +36,14 @@ def main() -> None:
     prior_dist = build_prior_distribution(hyperparameters)
 
     pvt = MaterialBalancePVT()
-    water_drive = WaterDriveModel(strength=0.0, exponent=1.2, max_support_fraction=0.75)
-    model = MaterialBalanceModel(pvt=pvt, water_drive=water_drive)
+    model = MaterialBalanceModel(pvt=pvt)
     
     pressure_uncertainty = 100.0
 
     config = MetropolisHastingsConfig(
-        n_iterations=60000,
-        burn_in=12000,
-        thinning=5,
+        n_iterations=12000,
+        burn_in=1000,
+        thinning=3,
         proposal_std=(4.0, 0.04),
         random_seed=2025,
     )

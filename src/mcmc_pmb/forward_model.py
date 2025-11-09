@@ -3,71 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Callable, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import scipy.optimize as opt
+from scipy.optimize import OptimizeResult
+
+from .pvt import MaterialBalancePVT
 
 
 @dataclass(frozen=True)
-class MaterialBalancePVT:
-    """Simple PVT correlations used by the forward model."""
-
-    initial_pressure: float = 3500.0
-    bubble_point: float = 3200.0
-    oil_fvf_initial: float = 1.20
-    gas_fvf_initial: float = 0.0045
-    solution_gor_initial: float = 650.0
-    oil_compress_above_pb: float = 12e-6
-    oil_compress_below_pb: float = 28e-6
-    gas_compressibility: float = 1.2e-3
-    rs_exponent_below_pb: float = 0.85
-
-    def oil_fvf(self, pressure: float) -> float:
-        """Return the oil formation volume factor at the specified pressure."""
-
-        pressure = float(np.clip(pressure, 50.0, self.initial_pressure * 1.2))
-        if pressure >= self.bubble_point:
-            delta_p = self.initial_pressure - pressure
-            return self.oil_fvf_initial * np.exp(self.oil_compress_above_pb * delta_p)
-
-        # compress to bubble point then apply higher compressibility below bubble
-        delta_p_above = self.initial_pressure - self.bubble_point
-        bo_at_pb = self.oil_fvf_initial * np.exp(self.oil_compress_above_pb * delta_p_above)
-        delta_p_below = self.bubble_point - pressure
-        return bo_at_pb * np.exp(self.oil_compress_below_pb * delta_p_below)
-
-    def gas_fvf(self, pressure: float) -> float:
-        """Return the gas formation volume factor at the specified pressure."""
-
-        pressure = float(np.clip(pressure, 50.0, self.initial_pressure * 1.2))
-        z_ratio = np.exp(self.gas_compressibility * (pressure - self.initial_pressure))
-        return self.gas_fvf_initial * (self.initial_pressure / pressure) * z_ratio
-
-    def solution_gor(self, pressure: float) -> float:
-        """Return the solution gas-oil ratio at the specified pressure."""
-
-        pressure = float(np.clip(pressure, 50.0, self.initial_pressure * 1.2))
-        if pressure >= self.bubble_point:
-            return self.solution_gor_initial
-        fraction = max(pressure, 1.0) / self.bubble_point
-        return self.solution_gor_initial * fraction**self.rs_exponent_below_pb
-
-
-@dataclass(frozen=True)
-class WaterDriveModel:
-    """Simple empirical representation of water-drive support."""
-
-    strength: float = 0.0
-    exponent: float = 1.1
-    max_support_fraction: float = 0.9
-
-    def support_fraction(self, depletion_fraction: float) -> float:
-        """Return the fractional pressure support provided by the aquifer."""
-
-        depletion_fraction = float(np.clip(depletion_fraction, 0.0, 1.0))
-        raw_support = self.strength * depletion_fraction**self.exponent
-        return float(np.clip(raw_support, 0.0, self.max_support_fraction))
+class _NoWaterDrive:  # placeholder removed: water drive is no longer supported
+    pass
 
 
 @dataclass(frozen=True)
@@ -76,18 +24,36 @@ class MaterialBalanceModel:
 
     pvt: MaterialBalancePVT
     pressure_bounds: Tuple[float, float] = (200.0, 5000.0)
-    drive_scale: float = 1.1  # empirical factor controlling depletion strength
-    water_drive: Optional[WaterDriveModel] = None
+    drive_scale: float = 1.1  # Used by the analytic approximation
+    root_tol: float = 1e-4
 
-    def _residual(self, pressure: float, N: float, m: float, Np: float, Rp: float) -> float:
-        """Residual between trial pressure and analytic depletion model."""
+    def _material_balance_residual(self, pressure: float, N: float, m: float, Np: float, Rp: float) -> float:
+        """Return residual of the general material balance equation."""
+        if N <= 0.0 or m < 0.0:
+            return pressure - self.pressure_bounds[0]
 
-        target_pressure = self._analytic_pressure(N=N, m=m, Np=Np, Rp=Rp)
-        return float(pressure - target_pressure)
+        pressure = float(np.clip(pressure, *self.pressure_bounds))
+
+        pvt = self.pvt
+        Bo = pvt.oil_fvf(pressure)
+        Bg = pvt.gas_fvf(pressure)
+        Rs = pvt.solution_gor(pressure)
+
+        Boi = pvt.oil_fvf(pvt.initial_pressure)
+        Bgi = pvt.gas_fvf(pvt.initial_pressure)
+        Rsi = pvt.solution_gor(pvt.initial_pressure)
+
+        # No water drive: effective voidage equals produced pore volume
+        fraction_depleted = float(np.clip(Np / max(N, 1e-12), 0.0, 1.0))
+        effective_voidage = Np
+
+        lhs = effective_voidage * (Bo + (Rp - Rs) * Bg)
+        rhs = N * ((Bo - Boi) + (Rsi - Rs) * Bg) + N * m * Boi * ((Bg / max(Bgi, 1e-12)) - 1.0)
+
+        return lhs - rhs
 
     def _analytic_pressure(self, N: float, m: float, Np: float, Rp: float) -> float:
         """Empirical closed-form approximation of material-balance depletion."""
-
         if N <= 0.0 or m < 0.0:
             return self.pressure_bounds[0]
 
@@ -97,50 +63,66 @@ class MaterialBalanceModel:
         gas_drive_term = np.clip(Rp - rs_initial, 0.0, None) / max(rs_initial, 1e-6)
 
         effective_drive = fraction_depleted * (1.0 + 0.6 * m) + 0.4 * m * gas_drive_term
-        if self.water_drive is not None and self.water_drive.strength > 0.0:
-            support = self.water_drive.support_fraction(float(np.clip(fraction_depleted, 0.0, 1.0)))
-            effective_drive = max(effective_drive - support, 1e-6)
+        
         exponent = -effective_drive / max(self.drive_scale, 1e-6)
-
         pressure = initial_pressure * np.exp(exponent)
-        pressure = np.clip(pressure, *self.pressure_bounds)
-        return float(pressure)
+        
+        return float(np.clip(pressure, *self.pressure_bounds))
 
-    def _solve_pressure(
-        self,
-        N: float,
-        m: float,
-        Np: float,
-        Rp: float,
-        initial_guess: float,
-    ) -> float:
-        """Return the analytic pressure estimate (root-solving surrogate)."""
+    def _solve_pressure(self, N: float, m: float, Np: float, Rp: float) -> float:
+        """
+        Solve the general MBE implicitly for reservoir pressure using SciPy.
+        
+        This method uses a robust bracketing solver (brentq) and falls back
+        to minimizing the residual if no root is found in the interval.
+        """
+        if N <= 0.0 or m < 0.0 or Np == 0:
+            return self.pvt.initial_pressure
 
-        return self._analytic_pressure(N=N, m=m, Np=Np, Rp=Rp)
+        residual_func = lambda p: self._material_balance_residual(p, N=N, m=m, Np=Np, Rp=Rp)
+        lower, upper = self.pressure_bounds
+
+
+        try:
+            # Brent's method: fast, robust, and guaranteed to find a root if one exists
+            root = opt.brentq(residual_func, lower, upper, xtol=self.root_tol)
+            return float(root)
+        except ValueError:
+
+            res: OptimizeResult = opt.minimize_scalar(
+                lambda p: abs(residual_func(p)),
+                bounds=self.pressure_bounds,
+                method="bounded",
+            )
+            return float(res.x)
 
     def predict_pressures(
         self,
         parameters: Sequence[float],
         production_data: pd.DataFrame,
-        pressure_initial_guess: Optional[float] = None,
     ) -> np.ndarray:
         """Predict reservoir pressures across the production history."""
-
         N, m = map(float, parameters)
-        if pressure_initial_guess is None:
-            pressure_initial_guess = self.pvt.initial_pressure
 
-        sorted_data = production_data.sort_values("time_days", kind="stable") if "time_days" in production_data.columns else production_data.copy()
+        # Ensure data is sorted by time for a valid history prediction
+        sorted_data = production_data.sort_values("time_days", kind="stable")
 
         pressures = []
-        current_guess = float(pressure_initial_guess)
-        for _, row in sorted_data.iterrows():
-            Np = float(row["Np"])
-            Rp = float(row["Rp"])
-            current_guess = self._solve_pressure(N=N, m=m, Np=Np, Rp=Rp, initial_guess=current_guess)
-            pressures.append(current_guess)
+        
+        # Use the first data point to get a good analytic first guess
+        first_row = next(sorted_data.itertuples(), None)
+        if first_row is None:
+            return np.array([], dtype=float)
+
+        current_guess = self._analytic_pressure(N=N, m=m, Np=first_row.Np, Rp=first_row.Rp)
+
+        # Use itertuples() for a major performance improvement over iterrows()
+        for row in sorted_data.itertuples(index=False):
+            # The previous step's solution is an excellent guess for the current step
+            pressure = self._solve_pressure(N=N, m=m, Np=row.Np, Rp=row.Rp)
+            pressures.append(pressure)
 
         return np.asarray(pressures, dtype=float)
 
 
-__all__ = ["MaterialBalanceModel", "MaterialBalancePVT", "WaterDriveModel"]
+__all__ = ["MaterialBalanceModel"]

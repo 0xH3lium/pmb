@@ -5,7 +5,7 @@ and run a Metropolis-Hastings sampler for reservoir material-balance analysis.
 """
 
 from .priors import PriorParameters, build_prior_distribution, log_prior
-from .forward_model import MaterialBalanceModel, WaterDriveModel
+from .forward_model import MaterialBalanceModel
 from .likelihood import log_likelihood
 from .mcmc import MetropolisHastingsConfig, run_metropolis_hastings
 from .synthetic import generate_synthetic_dataset
@@ -16,7 +16,6 @@ __all__ = [
     "build_prior_distribution",
     "log_prior",
     "MaterialBalanceModel",
-    "WaterDriveModel",
     "log_likelihood",
     "MetropolisHastingsConfig",
     "run_metropolis_hastings",

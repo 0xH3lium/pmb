@@ -8,7 +8,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .forward_model import MaterialBalanceModel, MaterialBalancePVT, WaterDriveModel
+from .forward_model import MaterialBalanceModel
+from .pvt import MaterialBalancePVT
 
 
 def generate_synthetic_dataset(
@@ -17,15 +18,13 @@ def generate_synthetic_dataset(
     true_parameters: tuple[float, float] = (110.0, 0.35),
     measurement_noise: float = 100.0,
     random_seed: int = 2026,
-    water_drive_strength: float = 0.0,
 ) -> pd.DataFrame:
     """Generate a synthetic production history with noisy pressure data."""
 
     rng = np.random.default_rng(random_seed)
 
     pvt = MaterialBalancePVT()
-    water_drive = WaterDriveModel(strength=water_drive_strength, exponent=1.2, max_support_fraction=0.8)
-    model = MaterialBalanceModel(pvt=pvt, water_drive=water_drive)
+    model = MaterialBalanceModel(pvt=pvt)
 
     time_days = np.linspace(0.0, 2400.0, num=n_steps)
     cum_oil = np.linspace(0.0, 48.0, num=n_steps)  # million STB
