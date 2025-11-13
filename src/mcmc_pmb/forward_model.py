@@ -23,6 +23,9 @@ class MaterialBalanceModel:
     """Forward solver that predicts pressure history for a given (N, m)."""
 
     pvt: MaterialBalancePVT
+    connate_water_saturation: float = 0.20   # Swi, fraction
+    pore_compressibility: float = 4.0e-6     # cf, in 1/psi
+    water_compressibility: float = 3.0e-6    # cw, in 1/psi
     pressure_bounds: Tuple[float, float] = (200.0, 5000.0)
     drive_scale: float = 1.1  # Used by the analytic approximation
     root_tol: float = 1e-4
@@ -47,13 +50,40 @@ class MaterialBalanceModel:
         fraction_depleted = float(np.clip(Np / max(N, 1e-12), 0.0, 1.0))
         effective_voidage = Np
 
+        # --- MODIFICATION START ---
+        # Calculate the expansion from connate water and pore volume reduction.
+        # This term provides additional reservoir drive energy.
+        delta_p = pvt.initial_pressure - pressure
+        compressibility_expansion = 0.0
+        if delta_p > 0:  # Effect only occurs during depletion
+            swi = self.connate_water_saturation
+            ceff_numerator = (self.water_compressibility * swi) + self.pore_compressibility
+            ceff_denominator = 1.0 - swi
+            # Effective compressibility referenced to hydrocarbon pore volume
+            effective_compressibility = ceff_numerator / max(ceff_denominator, 1e-9)
+            
+            # Total expansion volume, expressed as an equivalent surface oil volume
+            compressibility_expansion = N * Boi * effective_compressibility * delta_p
+        # --- MODIFICATION END ---
+        
+        # Left-hand side: Cumulative fluid withdrawal from the reservoir
         lhs = effective_voidage * (Bo + (Rp - Rs) * Bg)
-        rhs = N * ((Bo - Boi) + (Rsi - Rs) * Bg) + N * m * Boi * ((Bg / max(Bgi, 1e-12)) - 1.0)
+
+        # Right-hand side: Expansion of original fluids in place
+        oil_and_gas_expansion = N * ((Bo - Boi) + (Rsi - Rs) * Bg)
+        gas_cap_expansion = N * m * Boi * ((Bg / max(Bgi, 1e-12)) - 1.0)
+
+        # Add the new compressibility term to the expansion side
+        rhs = oil_and_gas_expansion + gas_cap_expansion + compressibility_expansion
 
         return lhs - rhs
 
     def _analytic_pressure(self, N: float, m: float, Np: float, Rp: float) -> float:
-        """Empirical closed-form approximation of material-balance depletion."""
+        """
+        Empirical closed-form approximation of material-balance depletion.
+        NOTE: This simple approximation does not include compressibility effects,
+        but it serves as a reasonable starting guess for the numerical solver.
+        """
         if N <= 0.0 or m < 0.0:
             return self.pressure_bounds[0]
 

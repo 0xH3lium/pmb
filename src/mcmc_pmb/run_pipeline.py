@@ -27,9 +27,9 @@ def main() -> None:
     data = pd.read_csv(data_path)
 
     hyperparameters = PriorParameters(
-        mean_N=115.0,
+        mean_N=100.0,
         mean_m=0.4,
-        std_N=35.0,
+        std_N=60.0,
         std_m=0.13,
         correlation=-0.1,
     )
