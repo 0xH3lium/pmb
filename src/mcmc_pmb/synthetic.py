@@ -19,12 +19,6 @@ def _calculate_instantaneous_gor(
 ) -> float:
     """
     Calculate the instantaneous producing GOR based on reservoir pressure.
-
-    This is a simplified but physically-grounded model:
-    - Above the bubble point, the GOR is just the solution GOR (Rs).
-    - Below the bubble point, free gas is produced. The instantaneous GOR is modeled
-      as Rs plus an additional term proportional to the pressure drawdown below the
-      bubble point, representing the production of liberated gas.
     """
     rs_at_p = pvt.solution_gor(pressure)
     if pressure >= pvt.bubble_point:
@@ -40,16 +34,12 @@ def generate_synthetic_dataset(
     output_csv: Optional[Path] = None,
     n_steps: int = 24,
     true_parameters: tuple[float, float] = (110.0, 0.35),
-    measurement_noise: float = 100.0,
-    gas_prod_coefficient: float = 0.6, # Represents fluid mobilities (scf/stb/psi)
+    measurement_noise: float = 50.0,  # Slightly reduced noise for clearer diagnostics
+    gas_prod_coefficient: float = 0.6,
     random_seed: int = 2026,
 ) -> pd.DataFrame:
     """
     Generate a physically-consistent synthetic production history.
-
-    This function performs a time-stepping simulation to ensure that the
-    produced Gas-Oil Ratio (Rp) and the resulting reservoir pressures are
-    mutually consistent and derived from the same underlying physics.
     """
     rng = np.random.default_rng(random_seed)
 
@@ -58,7 +48,12 @@ def generate_synthetic_dataset(
 
     # Define the oil production schedule
     time_days = np.linspace(0.0, 2400.0, num=n_steps)
-    cum_oil_schedule = np.linspace(0.0, 48.0, num=n_steps)  # million STB
+    
+    # --- FIX: Reduced max production from 48.0 to 18.0 MMSTB ---
+    # 48 MMSTB (44% recovery) is physically impossible for primary depletion,
+    # causing pressure to crash to the lower bound and stalling the MCMC.
+    # 18 MMSTB (~16% recovery) provides a realistic pressure decline curve.
+    cum_oil_schedule = np.linspace(0.0, 18.0, num=n_steps)
 
     # --- Time-stepping simulation loop ---
     true_pressures = np.zeros(n_steps)
@@ -70,8 +65,6 @@ def generate_synthetic_dataset(
     cumulative_gors[0] = pvt.solution_gor_initial
     cum_gas_produced = 0.0
 
-    # The public method `predict_pressures` is for batch operations.
-    # For a step-by-step simulation, we call the internal solver directly.
     for i in range(1, n_steps):
         # 1. Determine incremental oil production for this step
         delta_np = cum_oil_schedule[i] - cum_oil_schedule[i-1]
@@ -90,15 +83,12 @@ def generate_synthetic_dataset(
         current_rp = cum_gas_produced / current_np if current_np > 0 else pvt.solution_gor_initial
         cumulative_gors[i] = current_rp
         
-        # 5. Solve for the new reservoir pressure using the forward model
-        # We now have a consistent set of (Np, Rp) to predict the resulting pressure.
+        # 5. Solve for the new reservoir pressure
         current_pressure = model._solve_pressure(
             N=true_parameters[0], m=true_parameters[1], Np=current_np, Rp=current_rp
         )
         true_pressures[i] = current_pressure
     
-    # --- End of simulation loop ---
-
     # Assemble the final DataFrame
     production_data = pd.DataFrame(
         {
@@ -108,7 +98,6 @@ def generate_synthetic_dataset(
         }
     )
 
-    # Add true pressures and noisy measured pressures
     noisy_pressures = true_pressures + rng.normal(scale=measurement_noise, size=n_steps)
     production_data["Pressure_truth"] = true_pressures
     production_data["Pressure_measured"] = noisy_pressures

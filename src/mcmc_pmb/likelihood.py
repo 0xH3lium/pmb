@@ -27,6 +27,10 @@ def log_likelihood(
     except RuntimeError:
         return -np.inf
 
+
+    if np.any(np.isnan(predicted)):
+        return -np.inf
+    
     measured = production_data["Pressure_measured"].to_numpy(dtype=float)
     if predicted.shape != measured.shape:
         raise ValueError("Predicted and measured pressures mismatch")
