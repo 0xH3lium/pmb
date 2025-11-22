@@ -41,8 +41,8 @@ def main() -> None:
     pressure_uncertainty = 100.0
 
     config = MetropolisHastingsConfig(
-        n_iterations=12000,
-        burn_in=2000,
+        n_iterations=5000,
+        burn_in=500,
         thinning=3,
         proposal_std=(4.0, 0.04),
         random_seed=2025,
@@ -51,13 +51,22 @@ def main() -> None:
         adaptation_interval=100,
     )
 
-    result = run_metropolis_hastings(
+    # result = run_metropolis_hastings(
+    #     config=config,
+    #     prior_dist=prior_dist,
+    #     production_data=data,
+    #     model=model,
+    #     pressure_uncertainty=pressure_uncertainty,
+    #     initial_parameters=(hyperparameters.mean_N, hyperparameters.mean_m),
+    # )
+
+    from .pymc_sampler import run_pymc_sampler
+    result = run_pymc_sampler(
         config=config,
-        prior_dist=prior_dist,
+        prior_params=hyperparameters,
         production_data=data,
         model=model,
         pressure_uncertainty=pressure_uncertainty,
-        initial_parameters=(hyperparameters.mean_N, hyperparameters.mean_m),
     )
 
     outputs_dir.mkdir(parents=True, exist_ok=True)
