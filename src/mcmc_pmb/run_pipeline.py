@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .analysis import estimate_map, make_diagnostics, summarize_chain
+from .analysis import estimate_map, make_diagnostics, summarize_chain, plot_posterior_predictive
 from .forward_model import MaterialBalanceModel
 from .mcmc import MetropolisHastingsConfig, run_metropolis_hastings
 from .priors import PriorParameters, build_prior_distribution
@@ -42,10 +42,13 @@ def main() -> None:
 
     config = MetropolisHastingsConfig(
         n_iterations=12000,
-        burn_in=1000,
+        burn_in=2000,
         thinning=3,
         proposal_std=(4.0, 0.04),
         random_seed=2025,
+        use_adaptive=True,
+        adaptation_start=1000,
+        adaptation_interval=100,
     )
 
     result = run_metropolis_hastings(
@@ -72,6 +75,15 @@ def main() -> None:
         outputs_dir,
         log_posteriors=log_posteriors,
         map_estimate=map_estimate,
+    )
+
+    
+    plot_posterior_predictive(
+        chain=chain,
+        model=model,
+        production_data=data,
+        output_dir=outputs_dir,
+        n_curves=100,
     )
 
     print("Acceptance rate:", f"{result.acceptance_rate:.3f}")

@@ -12,7 +12,48 @@ import seaborn as sns
 
 sns.set_style("whitegrid")
 
-
+def plot_posterior_predictive(
+    chain: np.ndarray,
+    model: Any,
+    production_data: pd.DataFrame,
+    output_dir: Path,
+    n_curves: int = 100
+) -> None:
+    """
+    Generates a 'Spaghetti Plot' comparing posterior model predictions to observed data.
+    """
+    import matplotlib.pyplot as plt
+    
+    # Select random indices from the chain
+    rng = np.random.default_rng()
+    indices = rng.choice(chain.shape[0], size=n_curves, replace=False)
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Plot observed data
+    t = production_data["time_days"]
+    p_obs = production_data["Pressure_measured"]
+    ax.scatter(t, p_obs, color="black", zorder=5, label="Measured Data", s=20)
+    
+    # Plot posterior predictions
+    # Note: this requires passing the 'model' instance to this function
+    for idx in indices:
+        params = chain[idx]
+        try:
+            p_pred = model.predict_pressures(params, production_data)
+            ax.plot(t, p_pred, color="steelblue", alpha=0.1)
+        except Exception:
+            continue
+            
+    ax.set_xlabel("Time (days)")
+    ax.set_ylabel("Reservoir Pressure (psi)")
+    ax.set_title("Posterior Predictive Check (PPC)")
+    ax.legend(loc="upper right")
+    
+    fig.tight_layout()
+    fig.savefig(output_dir / "posterior_predictive_check.png", dpi=200)
+    plt.close(fig)
+    
 def summarize_chain(
     chain: np.ndarray,
     parameter_names: Iterable[str] = ("N", "m"),

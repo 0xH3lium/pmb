@@ -21,6 +21,10 @@ class MetropolisHastingsConfig:
     thinning: int = 1
     proposal_std: Sequence[float] = (5.0, 0.05)
     random_seed: Optional[int] = 42
+    use_adaptive: bool = False
+    initial_covariance: Optional[Sequence[Sequence[float]]] = None
+    adaptation_start: int = 100
+    adaptation_interval: int = 100
 
     def validate(self) -> None:
         if self.n_iterations <= 0:
@@ -31,6 +35,11 @@ class MetropolisHastingsConfig:
             raise ValueError("thinning must be positive")
         if len(self.proposal_std) != 2:
             raise ValueError("proposal_std must contain two elements")
+        if self.use_adaptive:
+            if self.adaptation_start < 0:
+                raise ValueError("adaptation_start must be non-negative")
+            if self.adaptation_interval <= 0:
+                raise ValueError("adaptation_interval must be positive")
 
 
 @dataclass
@@ -76,6 +85,19 @@ def run_metropolis_hastings(
 
     rng = np.random.default_rng(config.random_seed)
     proposal_std = np.asarray(config.proposal_std, dtype=float)
+    n_params = len(proposal_std)
+
+    # Adaptive Metropolis initialization
+    use_adaptive = config.use_adaptive
+    if use_adaptive:
+        if config.initial_covariance is not None:
+            current_cov = np.asarray(config.initial_covariance, dtype=float)
+        else:
+            current_cov = np.diag(proposal_std**2)
+        
+        # Scaling factor for optimal acceptance rate (2.38^2 / d)
+        sd = (2.38**2) / n_params
+        epsilon = 1e-6  # Small constant for numerical stability
 
     if initial_parameters is None:
         if hasattr(prior_dist, "mean"):
@@ -85,7 +107,7 @@ def run_metropolis_hastings(
     else:
         current_params = np.asarray(tuple(initial_parameters), dtype=float)
 
-    raw_chain = np.zeros((config.n_iterations, 2), dtype=float)
+    raw_chain = np.zeros((config.n_iterations, n_params), dtype=float)
     log_posteriors = np.full(config.n_iterations, -np.inf, dtype=float)
     accepted = np.zeros(config.n_iterations, dtype=bool)
 
@@ -99,7 +121,19 @@ def run_metropolis_hastings(
     current_log_posterior = current_log_prior + current_log_likelihood
 
     for idx in range(config.n_iterations):
-        proposal = current_params + rng.normal(scale=proposal_std, size=2)
+        # Proposal generation
+        if use_adaptive and idx > config.adaptation_start:
+            # Update covariance periodically
+            if (idx - config.adaptation_start) % config.adaptation_interval == 0:
+                # Calculate covariance of the chain history up to now
+                # We use the raw chain history for adaptation
+                history = raw_chain[:idx]
+                current_cov = sd * np.cov(history, rowvar=False) + sd * epsilon * np.eye(n_params)
+            
+            proposal = rng.multivariate_normal(current_params, current_cov)
+        else:
+            proposal = current_params + rng.normal(scale=proposal_std, size=n_params)
+
         proposal_log_prior = log_prior(proposal, prior_dist)
         if np.isfinite(proposal_log_prior):
             proposal_log_likelihood = compute_log_likelihood(
