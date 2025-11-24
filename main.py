@@ -10,7 +10,7 @@ from mcmc_pmb.run_pipeline import main as run_pipeline
 
 
 def main():
-    run_pipeline()
+    run_pipeline(sampler="nuts")
 
 
 if __name__ == "__main__":

@@ -3,55 +3,56 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
 
+from .forward_model import ProductionDataset, prepare_production_dataset
+
 sns.set_style("whitegrid")
+
 
 def plot_posterior_predictive(
     chain: np.ndarray,
     model: Any,
-    production_data: pd.DataFrame,
+    production_data: pd.DataFrame | ProductionDataset,
     output_dir: Path,
     n_curves: int = 100
 ) -> None:
-    """
-    Generates a 'Spaghetti Plot' comparing posterior model predictions to observed data.
-    """
-    import matplotlib.pyplot as plt
-    
-    # Select random indices from the chain
+    dataset = prepare_production_dataset(production_data)
     rng = np.random.default_rng()
-    indices = rng.choice(chain.shape[0], size=n_curves, replace=False)
     
+    n_samples = chain.shape[0]
+    if n_samples == 0: return
+
+    indices = rng.choice(n_samples, size=min(n_curves, n_samples), replace=False)
+    
+    # Pre-allocate array for speed
+    preds = np.empty((len(indices), dataset.n_steps))
+    
+    # Simple loop is fine here as it's only 100 iterations, 
+    # but using the optimized model helps.
+    for i, idx in enumerate(indices):
+        preds[i] = model.predict_pressures(chain[idx], dataset)
+
     fig, ax = plt.subplots(figsize=(10, 6))
     
-    # Plot observed data
-    t = production_data["time_days"]
-    p_obs = production_data["Pressure_measured"]
-    ax.scatter(t, p_obs, color="black", zorder=5, label="Measured Data", s=20)
+    # Plot curves as a collection for better rendering performance than individual plot calls
+    t = dataset.time_days
+    ax.plot(t, preds.T, color="steelblue", alpha=0.1)
     
-    # Plot posterior predictions
-    # Note: this requires passing the 'model' instance to this function
-    for idx in indices:
-        params = chain[idx]
-        try:
-            p_pred = model.predict_pressures(params, production_data)
-            ax.plot(t, p_pred, color="steelblue", alpha=0.1)
-        except Exception:
-            continue
-            
+    ax.scatter(t, dataset.pressure_measured, color="black", zorder=5, label="Measured", s=20)
+    
     ax.set_xlabel("Time (days)")
-    ax.set_ylabel("Reservoir Pressure (psi)")
-    ax.set_title("Posterior Predictive Check (PPC)")
+    ax.set_ylabel("Pressure (psi)")
+    ax.set_title("Posterior Predictive Check")
     ax.legend(loc="upper right")
     
     fig.tight_layout()
-    fig.savefig(output_dir / "posterior_predictive_check.png", dpi=200)
+    fig.savefig(output_dir / "ppc.png", dpi=200)
     plt.close(fig)
     
 def summarize_chain(
@@ -222,4 +223,4 @@ def make_diagnostics(
         plt.close(fig)
 
 
-__all__ = ["summarize_chain", "estimate_map", "make_diagnostics"]
+__all__ = ["summarize_chain", "estimate_map", "make_diagnostics", "plot_posterior_predictive"]

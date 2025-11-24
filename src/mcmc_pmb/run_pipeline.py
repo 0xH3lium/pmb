@@ -1,104 +1,67 @@
-"""End-to-end pipeline to run MCMC for probabilistic material balance."""
+"""End-to-end pipeline."""
 
 from __future__ import annotations
-
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
 from .analysis import estimate_map, make_diagnostics, summarize_chain, plot_posterior_predictive
-from .forward_model import MaterialBalanceModel
-from .mcmc import MetropolisHastingsConfig, run_metropolis_hastings
-from .priors import PriorParameters, build_prior_distribution
+from .forward_model import MaterialBalanceModel, prepare_production_dataset
+from .mcmc import MetropolisHastingsConfig, NUTSConfig
+from .priors import PriorParameters
 from .pvt import MaterialBalancePVT
 from .synthetic import generate_synthetic_dataset
+from .pymc_model import run_sampler # Unified import
 
-
-def main() -> None:
-    project_root = Path(__file__).resolve().parents[2]
-    data_path = project_root / "data" / "production_data.csv"
-    outputs_dir = project_root / "outputs"
+def main(sampler: str = "metropolis") -> None:
+    root = Path(__file__).resolve().parents[2]
+    data_path = root / "data" / "production_data.csv"
+    out_dir = root / "outputs"
 
     if not data_path.exists():
-        print(f"No data at {data_path}. Generating synthetic dataset.")
-        generate_synthetic_dataset(output_csv=data_path)
+        print(f"Generating synthetic data at {data_path}...")
+        generate_synthetic_dataset(output_csv=data_path, max_prod=18.0) # Explicit physics limit
 
     data = pd.read_csv(data_path)
-
-    hyperparameters = PriorParameters(
-        mean_N=100.0,
-        mean_m=0.4,
-        std_N=60.0,
-        std_m=0.13,
-        correlation=-0.1,
-    )
-    prior_dist = build_prior_distribution(hyperparameters)
-
+    
+    # Setup
     pvt = MaterialBalancePVT()
     model = MaterialBalanceModel(pvt=pvt)
+    dataset = prepare_production_dataset(data)
+    prior = PriorParameters(100.0, 0.4, 60.0, 0.13, -0.1)
+    sigma = 100.0
+
+    print(f"Running {sampler.upper()} sampler...")
     
-    pressure_uncertainty = 100.0
+    if sampler.lower() == "nuts":
+        config = NUTSConfig(n_samples=2000, n_tune=1000, target_accept=0.9)
+    else:
+        config = MetropolisHastingsConfig(
+            n_iterations=10000, burn_in=2000, thinning=5, 
+            proposal_std=(3.0, 0.03), use_adaptive=True
+        )
 
-    config = MetropolisHastingsConfig(
-        n_iterations=5000,
-        burn_in=500,
-        thinning=3,
-        proposal_std=(4.0, 0.04),
-        random_seed=2025,
-        use_adaptive=True,
-        adaptation_start=1000,
-        adaptation_interval=100,
-    )
+    result = run_sampler(config, prior, dataset, model, sigma, sampler_type=sampler.lower())
 
-    # result = run_metropolis_hastings(
-    #     config=config,
-    #     prior_dist=prior_dist,
-    #     production_data=data,
-    #     model=model,
-    #     pressure_uncertainty=pressure_uncertainty,
-    #     initial_parameters=(hyperparameters.mean_N, hyperparameters.mean_m),
-    # )
-
-    from .pymc_sampler import run_pymc_sampler
-    result = run_pymc_sampler(
-        config=config,
-        prior_params=hyperparameters,
-        production_data=data,
-        model=model,
-        pressure_uncertainty=pressure_uncertainty,
-    )
-
-    outputs_dir.mkdir(parents=True, exist_ok=True)
+    # Analysis
+    out_dir.mkdir(parents=True, exist_ok=True)
     chain = result.chain
-    log_posteriors = result.log_posteriors_chain
-    map_estimate = estimate_map(chain, log_posteriors)
-
-    np.savetxt(outputs_dir / "posterior_samples.csv", chain, delimiter=",", header="N,m", comments="")
-
-    summary_table = summarize_chain(chain, map_estimate=map_estimate)
-    summary_table.to_csv(outputs_dir / "posterior_summary.csv", index=False)
-
-    make_diagnostics(
-        chain,
-        outputs_dir,
-        log_posteriors=log_posteriors,
-        map_estimate=map_estimate,
-    )
-
     
-    plot_posterior_predictive(
-        chain=chain,
-        model=model,
-        production_data=data,
-        output_dir=outputs_dir,
-        n_curves=100,
-    )
+    np.savetxt(out_dir / "samples.csv", chain, delimiter=",", header="N,m")
+    
+    map_est = estimate_map(chain, result.log_posteriors_chain)
+    summary = summarize_chain(chain, map_estimate=map_est)
+    summary.to_csv(out_dir / "summary.csv", index=False)
+    
+    make_diagnostics(chain, out_dir, result.log_posteriors_chain, map_est)
+    
+    plot_posterior_predictive(chain, model, dataset, out_dir)
 
-    print("Acceptance rate:", f"{result.acceptance_rate:.3f}")
-    print("Posterior summary:\n", summary_table)
-    print("MAP estimate (N, m):", tuple(f"{value:.3f}" for value in map_estimate))
-
+    print(f"\nSampler: {sampler}")
+    print(f"Acceptance: {result.acceptance_rate:.2%}")
+    print("MAP Estimate:", tuple(np.round(map_est, 3)))
+    print(summary)
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main(sys.argv[1] if len(sys.argv) > 1 else "nuts")

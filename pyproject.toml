@@ -12,6 +12,7 @@ dependencies = [
 	"seaborn",
 	"ipykernel>=7.1.0",
 	"pymc>=5.26.1",
+	"numba",
 ]
 
 [build-system]
