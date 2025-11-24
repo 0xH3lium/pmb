@@ -1,4 +1,4 @@
-"""Forward material-balance model for pressure prediction."""
+"""Vectorised, differentiable forward material-balance model."""
 
 from __future__ import annotations
 
@@ -7,9 +7,13 @@ from typing import Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
-import scipy.optimize as opt
+import pytensor.tensor as pt
+from pytensor import config as pt_config
+from pytensor import function
+from pytensor import scan
 
-from .pvt import MaterialBalancePVT
+from .pvt import MaterialBalancePVT, PVTEngine
+
 
 @dataclass(frozen=True, slots=True)
 class ProductionDataset:
@@ -23,16 +27,18 @@ class ProductionDataset:
     def n_steps(self) -> int:
         return self.time_days.size
 
+
 def prepare_production_dataset(data: Union[pd.DataFrame, ProductionDataset]) -> ProductionDataset:
     if isinstance(data, ProductionDataset):
         return data
 
     required = {"time_days", "Np", "Rp", "Pressure_measured"}
     if not required.issubset(data.columns):
-        raise ValueError(f"Missing columns: {required - set(data.columns)}")
+        missing = required - set(data.columns)
+        raise ValueError(f"Missing columns: {missing}")
 
     df = data.sort_values("time_days") if not data["time_days"].is_monotonic_increasing else data
-    
+
     return ProductionDataset(
         time_days=df["time_days"].to_numpy(dtype=float),
         Np=df["Np"].to_numpy(dtype=float),
@@ -41,105 +47,183 @@ def prepare_production_dataset(data: Union[pd.DataFrame, ProductionDataset]) -> 
         pressure_truth=df["Pressure_truth"].to_numpy(dtype=float) if "Pressure_truth" in df else None,
     )
 
+
+@dataclass(frozen=True, slots=True)
+class SolverContext:
+    engine: PVTEngine
+    eff_compressibility: float
+    initial_pressure: float
+    pressure_bounds: tuple[float, float]
+    jacobian_epsilon: float
+    damping: float
+    tolerance: float
+    newton_steps: int
+    Boi: float
+    Bgi: float
+    Rsi: float
+
+
 @dataclass(frozen=True, slots=True)
 class MaterialBalanceModel:
-    pvt: MaterialBalancePVT
+    pvt_params: MaterialBalancePVT = field(default_factory=MaterialBalancePVT)
+    pvt_engine: Optional[PVTEngine] = None
     connate_water_saturation: float = 0.20
     pore_compressibility: float = 4.0e-6
     water_compressibility: float = 3.0e-6
     pressure_bounds: tuple[float, float] = (100.0, 5000.0)
-    root_tol: float = 1e-4
-    
-    # Internal effective compressibility term, not passed to init
-    _eff_comp_term: float = field(init=False)
+    newton_steps: int = 6
+    newton_damping: float = 0.8
+    newton_tol: float = 1e-4
+    jacobian_epsilon: float = 1e-9
 
-    def __init__(
-        self,
-        pvt: MaterialBalancePVT,
-        connate_water_saturation: float = 0.20,
-        pore_compressibility: float = 4.0e-6,
-        water_compressibility: float = 3.0e-6,
-        pressure_bounds: tuple[float, float] = (100.0, 5000.0),
-        root_tol: float = 1e-4,
-    ):
-        object.__setattr__(self, "pvt", pvt)
-        object.__setattr__(self, "connate_water_saturation", connate_water_saturation)
-        object.__setattr__(self, "pore_compressibility", pore_compressibility)
-        object.__setattr__(self, "water_compressibility", water_compressibility)
-        object.__setattr__(self, "pressure_bounds", pressure_bounds)
-        object.__setattr__(self, "root_tol", root_tol)
-        
-        # Precompute effective compressibility factor
-        swi = connate_water_saturation
-        ceff_num = (water_compressibility * swi) + pore_compressibility
+    _context: SolverContext = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        engine = self.pvt_engine or self.pvt_params.build_engine()
+        lower_bound = max(self.pvt_params.pressure_min, self.pressure_bounds[0])
+        upper_bound = min(self.pvt_params.pressure_max, self.pressure_bounds[1])
+        if lower_bound >= upper_bound:
+            raise ValueError("Invalid pressure bounds after intersecting with PVT limits.")
+
+        swi = self.connate_water_saturation
+        ceff_num = (self.water_compressibility * swi) + self.pore_compressibility
         ceff_den = max(1.0 - swi, 1e-9)
-        object.__setattr__(self, "_eff_comp_term", ceff_num / ceff_den)
+        eff_comp = ceff_num / ceff_den
 
-    def _residual(self, pressure: float, N: float, m: float, Np: float, Rp: float) -> float:
-        # PVT Lookups
-        Bo = self.pvt.oil_fvf(pressure)
-        Bg = self.pvt.gas_fvf(pressure)
-        Rs = self.pvt.solution_gor(pressure)
+        context = SolverContext(
+            engine=engine,
+            eff_compressibility=eff_comp,
+            initial_pressure=self.pvt_params.initial_pressure,
+            pressure_bounds=(lower_bound, upper_bound),
+            jacobian_epsilon=self.jacobian_epsilon,
+            damping=self.newton_damping,
+            tolerance=self.newton_tol,
+            newton_steps=self.newton_steps,
+            Boi=engine.oil_at_initial,
+            Bgi=max(engine.gas_at_initial, 1e-12),
+            Rsi=engine.rs_at_initial,
+        )
 
-        # Initial conditions
-        Pi = self.pvt.initial_pressure
-        Boi = self.pvt.oil_fvf(Pi)
-        Bgi = self.pvt.gas_fvf(Pi)
-        Rsi = self.pvt.solution_gor(Pi)
+        object.__setattr__(self, "_context", context)
+        object.__setattr__(self, "pvt_engine", engine)
 
-        # Expansion terms
-        delta_p = Pi - pressure
-        
-        # Compressibility expansion (only active if depleted)
-        comp_expansion = 0.0
-        if delta_p > 0:
-            comp_expansion = N * Boi * self._eff_comp_term * delta_p
+    def symbolic_pressures(
+        self,
+        N: pt.TensorVariable,
+        m: pt.TensorVariable,
+        dataset: ProductionDataset,
+    ) -> pt.TensorVariable:
+        """Return PyTensor graph for predicted pressures given symbolic parameters."""
 
-        # Material Balance Equation
-        lhs = Np * (Bo + (Rp - Rs) * Bg)
-        rhs = (N * ((Bo - Boi) + (Rsi - Rs) * Bg)) + \
-              (N * m * Boi * ((Bg / max(Bgi, 1e-12)) - 1.0)) + \
-              comp_expansion
+        dtype = pt_config.floatX
+        Np = pt.as_tensor_variable(dataset.Np.astype(dtype))
+        Rp = pt.as_tensor_variable(dataset.Rp.astype(dtype))
 
-        return lhs - rhs
+        context = self._context
 
-    def _solve_pressure(
-        self, N: float, m: float, Np: float, Rp: float, upper_hint: float
-    ) -> float:
-        if N <= 0 or m < 0 or Np == 0:
-            return self.pvt.initial_pressure
+        def step(np_t, rp_t, prev_pressure, N_param, m_param):
+            next_pressure = _newton_solve(
+                prev_pressure,
+                N_param,
+                m_param,
+                np_t,
+                rp_t,
+                context,
+            )
+            return next_pressure
 
-        # Closure for the solver
-        def func(p): 
-            return self._residual(p, N, m, Np, Rp)
+        outputs, _ = scan(
+            step,
+            sequences=[Np, Rp],
+            outputs_info=pt.as_tensor_variable(np.array(context.initial_pressure, dtype=dtype)),
+            non_sequences=[N, m],
+            strict=False,
+        )
 
-        lower, default_upper = self.pressure_bounds
-        # Ensure upper hint is valid
-        upper = upper_hint if lower < upper_hint <= default_upper else default_upper
+        return outputs
 
-        try:
-            return float(opt.brentq(func, lower, upper, xtol=self.root_tol))
-        except ValueError:
-            # Fallback attempts
-            try:
-                if upper != default_upper:
-                    return float(opt.brentq(func, lower, default_upper, xtol=self.root_tol))
-            except ValueError:
-                pass
-            return lower
+    def make_predict_function(self, dataset: ProductionDataset):
+        theta = pt.vector("theta", dtype=pt_config.floatX)
+        pressures = self.symbolic_pressures(theta[0], theta[1], dataset)
+        return function([theta], pressures)
 
     def predict_pressures(
-        self, parameters: Sequence[float], production_data: ProductionDataset
+        self, parameters: Sequence[float], production_data: Union[ProductionDataset, pd.DataFrame]
     ) -> np.ndarray:
-        N, m = parameters
-        n_steps = production_data.n_steps
-        pressures = np.empty(n_steps, dtype=np.float64)
-        
-        prev_p = self.pvt.initial_pressure
-        
-        for i in range(n_steps):
-            p = self._solve_pressure(N, m, production_data.Np[i], production_data.Rp[i], prev_p)
-            pressures[i] = p
-            prev_p = p
-            
-        return pressures
+        dataset = (
+            production_data
+            if isinstance(production_data, ProductionDataset)
+            else prepare_production_dataset(production_data)
+        )
+
+        theta = np.asarray(parameters, dtype=float)
+        predictor = self.make_predict_function(dataset)
+        return predictor(theta.astype(pt_config.floatX))
+
+
+def _newton_solve(
+    initial_guess: pt.TensorVariable,
+    N: pt.TensorVariable,
+    m: pt.TensorVariable,
+    Np_t: pt.TensorVariable,
+    Rp_t: pt.TensorVariable,
+    context: SolverContext,
+) -> pt.TensorVariable:
+    """Run a fixed number of Newton iterations in PyTensor graph form."""
+
+    p = initial_guess
+    min_bound, max_bound = context.pressure_bounds
+
+    for _ in range(context.newton_steps):
+        residual, derivative = _material_balance_residual(
+            p, N, m, Np_t, Rp_t, context
+        )
+
+        jac_safe = pt.switch(
+            pt.abs(derivative) < context.jacobian_epsilon,
+            pt.switch(pt.lt(derivative, 0), -context.jacobian_epsilon, context.jacobian_epsilon),
+            derivative,
+        )
+
+        delta = residual / jac_safe
+        p_candidate = p - context.damping * delta
+        p_candidate = pt.clip(p_candidate, min_bound, max_bound)
+
+        converged = pt.lt(pt.abs(residual), context.tolerance)
+        p = pt.switch(converged, p, p_candidate)
+        p = pt.where(pt.isnan(p), initial_guess, p)
+
+    valid = pt.and_(pt.gt(N, 0.0), pt.ge(m, 0.0))
+    return pt.switch(valid, p, initial_guess)
+
+
+def _material_balance_residual(
+    pressure: pt.TensorVariable,
+    N: pt.TensorVariable,
+    m: pt.TensorVariable,
+    Np_t: pt.TensorVariable,
+    Rp_t: pt.TensorVariable,
+    context: SolverContext,
+) -> tuple[pt.TensorVariable, pt.TensorVariable]:
+    engine = context.engine
+
+    Bo, dBo, Bg, dBg, Rs, dRs = engine.evaluate_all(pressure)
+
+    delta_p = context.initial_pressure - pressure
+    comp_coeff = N * context.Boi * context.eff_compressibility
+    comp_term = pt.switch(pt.gt(delta_p, 0.0), comp_coeff * delta_p, 0.0)
+    dcomp_dp = pt.switch(pt.gt(delta_p, 0.0), -comp_coeff, 0.0)
+
+    lhs = Np_t * (Bo + (Rp_t - Rs) * Bg)
+    dL_dp = Np_t * (dBo + (Rp_t - Rs) * dBg - dRs * Bg)
+
+    rhs_fluid = N * ((Bo - context.Boi) + (context.Rsi - Rs) * Bg)
+    drhs_fluid = N * (dBo - dRs * Bg + (context.Rsi - Rs) * dBg)
+
+    rhs_gas = N * m * context.Boi * ((Bg / context.Bgi) - 1.0)
+    drhs_gas = N * m * context.Boi * (dBg / context.Bgi)
+
+    residual = lhs - (rhs_fluid + rhs_gas + comp_term)
+    derivative = dL_dp - (drhs_fluid + drhs_gas + dcomp_dp)
+
+    return residual, derivative

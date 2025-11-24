@@ -25,8 +25,8 @@ def main(sampler: str = "metropolis") -> None:
     data = pd.read_csv(data_path)
     
     # Setup
-    pvt = MaterialBalancePVT()
-    model = MaterialBalanceModel(pvt=pvt)
+    pvt_params = MaterialBalancePVT()
+    model = MaterialBalanceModel(pvt_params=pvt_params)
     dataset = prepare_production_dataset(data)
     prior = PriorParameters(100.0, 0.4, 60.0, 0.13, -0.1)
     sigma = 100.0

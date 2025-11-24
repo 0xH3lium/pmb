@@ -76,7 +76,7 @@ class NUTSConfig:
     target_accept: float = 0.8
     max_treedepth: int = 10
     random_seed: Optional[int] = 42
-    n_chains: int = 2
+    n_chains: int = 4
     
     def validate(self) -> None:
         if self.n_samples <= 0:

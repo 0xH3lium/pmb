@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from .forward_model import MaterialBalanceModel
+from .forward_model import MaterialBalanceModel, prepare_production_dataset
 
 
 def log_likelihood(
@@ -22,8 +22,10 @@ def log_likelihood(
     if pressure_uncertainty <= 0.0:
         raise ValueError("pressure_uncertainty must be positive")
 
+    dataset = prepare_production_dataset(production_data)
+
     try:
-        predicted = model.predict_pressures(parameters, production_data)
+        predicted = model.predict_pressures(parameters, dataset)
     except RuntimeError:
         return -np.inf
 

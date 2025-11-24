@@ -1,24 +1,35 @@
-"""
-PVT correlations for material balance calculations.
-Supports both Numpy (float/array) and PyTensor inputs via backend dispatch.
+"""Differentiable PVT correlations for the material-balance model.
+
+The classic implementation mixed NumPy and PyTensor execution paths, which
+prevented aggressive graph optimisation and gradient-based inference.  This
+module refactors the PVT logic into two explicit components:
+
+* ``MaterialBalancePVT`` – an immutable container of correlation parameters.
+* ``PVTEngine`` – a differentiable evaluator backed by monotonic cubic
+  splines, exposing PyTensor-friendly methods for fast and smooth execution.
+
+The construction of the spline coefficients happens eagerly with NumPy and
+SciPy.  All runtime evaluations – including derivatives – use PyTensor ops
+only, which keeps the computation graph differentiable end-to-end.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Union
+from typing import Tuple
 
 import numpy as np
 import pytensor.tensor as pt
+from pytensor import config as pt_config
+from scipy.interpolate import PchipInterpolator
 
-# Type alias for inputs that can be float, array, or symbolic tensor
-Numeric = Union[float, np.ndarray, pt.TensorVariable]
+FloatArray = np.ndarray
+
 
 @dataclass(frozen=True, slots=True)
 class MaterialBalancePVT:
-    """
-    PVT correlations suitable for material balance modeling.
-    """
+    """Immutable container for the PVT correlation parameters."""
+
     initial_pressure: float = 3500.0
     bubble_point: float = 3200.0
     oil_fvf_initial: float = 1.20
@@ -29,117 +40,253 @@ class MaterialBalancePVT:
     z_factor_initial: float = 0.88
     p_at_min_z: float = 2200.0
     rs_exponent_below_pb: float = 0.85
+    pressure_min: float = 50.0
+    pressure_multiplier: float = 1.2
+    spline_size: int = 256
 
-    # Internal pre-calculated constants (not passed to init)
-    _bo_at_pb: float = field(init=False, repr=False)
-    _z_factor_a: float = field(init=False, repr=False)
-    _z_factor_b: float = field(init=False, repr=False)
-
-    def __init__(
-        self,
-        initial_pressure: float = 3500.0,
-        bubble_point: float = 3200.0,
-        oil_fvf_initial: float = 1.20,
-        gas_fvf_initial: float = 0.0045,
-        solution_gor_initial: float = 650.0,
-        oil_compress_above_pb: float = 12e-6,
-        oil_shrinkage_below_pb: float = 1.5e-4,
-        z_factor_initial: float = 0.88,
-        p_at_min_z: float = 2200.0,
-        rs_exponent_below_pb: float = 0.85,
-    ):
-        # Manual __init__ required for validation/pre-calc with frozen=True
-        object.__setattr__(self, "initial_pressure", initial_pressure)
-        object.__setattr__(self, "bubble_point", bubble_point)
-        object.__setattr__(self, "oil_fvf_initial", oil_fvf_initial)
-        object.__setattr__(self, "gas_fvf_initial", gas_fvf_initial)
-        object.__setattr__(self, "solution_gor_initial", solution_gor_initial)
-        object.__setattr__(self, "oil_compress_above_pb", oil_compress_above_pb)
-        object.__setattr__(self, "oil_shrinkage_below_pb", oil_shrinkage_below_pb)
-        object.__setattr__(self, "z_factor_initial", z_factor_initial)
-        object.__setattr__(self, "p_at_min_z", p_at_min_z)
-        object.__setattr__(self, "rs_exponent_below_pb", rs_exponent_below_pb)
-
+    def __post_init__(self) -> None:
         if self.bubble_point > self.initial_pressure:
-            raise ValueError("Bubble point pressure cannot be greater than initial pressure.")
+            raise ValueError("Bubble point pressure cannot exceed initial pressure.")
+        if self.spline_size < 4:
+            raise ValueError("spline_size must be at least 4 points for cubic splines.")
 
-        # --- Pre-calculations ---
-        delta_p = self.initial_pressure - self.bubble_point
-        bo_at_pb = self.oil_fvf_initial * np.exp(self.oil_compress_above_pb * delta_p)
-        
-        Pi, Zi, P_min = self.initial_pressure, self.z_factor_initial, self.p_at_min_z
-        denom = Pi**2 - 2 * P_min * Pi
-        if abs(denom) < 1e-9:
-            raise ValueError("Unstable Z-factor parameters (singularity in quadratic fit).")
-            
-        z_a = (Zi - 1.0) / denom
-        z_b = -2 * z_a * P_min
+    @property
+    def pressure_max(self) -> float:
+        return self.initial_pressure * self.pressure_multiplier
 
-        object.__setattr__(self, "_bo_at_pb", bo_at_pb)
-        object.__setattr__(self, "_z_factor_a", z_a)
-        object.__setattr__(self, "_z_factor_b", z_b)
+    def build_engine(self, *, spline_size: int | None = None) -> "PVTEngine":
+        """Create a differentiable PVT engine using monotonic cubic splines."""
 
-    def _is_tensor(self, x: Any) -> bool:
-        """Check if input is a PyTensor variable."""
-        return isinstance(x, (pt.TensorVariable, pt.TensorConstant))
+        grid_size = int(spline_size or self.spline_size)
+        pressure_grid = np.linspace(self.pressure_min, self.pressure_max, grid_size)
 
-    def _math(self, x: Any):
-        """Returns the math module (numpy or pytensor.tensor) matching the input."""
-        return pt if self._is_tensor(x) else np
+        bo_values = _oil_fvf_exact(self, pressure_grid)
+        bg_values = _gas_fvf_exact(self, pressure_grid)
+        rs_values = _solution_gor_exact(self, pressure_grid)
 
-    def _clip(self, val: Numeric, low: float, high: float) -> Numeric:
-        m = self._math(val)
-        return m.clip(val, low, high)
+        bo_coeffs = _piecewise_cubic_coefficients(pressure_grid, bo_values)
+        bg_coeffs = _piecewise_cubic_coefficients(pressure_grid, bg_values)
+        rs_coeffs = _piecewise_cubic_coefficients(pressure_grid, rs_values)
 
-    def _exp(self, val: Numeric) -> Numeric:
-        return self._math(val).exp(val)
+        return PVTEngine(
+            params=self,
+            knots=pressure_grid,
+            oil_coefficients=bo_coeffs,
+            gas_coefficients=bg_coeffs,
+            rs_coefficients=rs_coeffs,
+        )
 
-    def _switch(self, cond: Any, if_true: Numeric, if_false: Numeric) -> Numeric:
-        # If any input is a tensor, we must use pt.switch
-        if self._is_tensor(cond) or self._is_tensor(if_true) or self._is_tensor(if_false):
-            return pt.switch(cond, if_true, if_false)
-        return np.where(cond, if_true, if_false)
 
-    def oil_fvf(self, pressure: Numeric) -> Numeric:
-        p_safe = self._clip(pressure, 50.0, self.initial_pressure * 1.2)
-        
-        # Above Pb
-        d_above = self.initial_pressure - p_safe
-        bo_above = self.oil_fvf_initial * self._exp(self.oil_compress_above_pb * d_above)
-        
-        # Below Pb
-        d_below = self.bubble_point - p_safe
-        bo_below = self._bo_at_pb - self.oil_shrinkage_below_pb * d_below
-        
-        # Clamp minimum Bo to 1.0 (handle tensor vs numpy max)
-        if self._is_tensor(bo_below):
-            bo_below = pt.maximum(1.0, bo_below)
-        else:
-            bo_below = np.maximum(1.0, bo_below)
+@dataclass(frozen=True, slots=True)
+class PVTEngine:
+    """Differentiable spline-backed evaluator for PVT properties."""
 
-        # Condition: Pressure >= Bubble Point
-        # Use >= operator to support both Numpy (bool array) and PyTensor (TensorVariable)
-        is_above = p_safe >= self.bubble_point
-        
-        return self._switch(is_above, bo_above, bo_below)
+    params: MaterialBalancePVT
+    knots: FloatArray
+    oil_coefficients: FloatArray
+    gas_coefficients: FloatArray
+    rs_coefficients: FloatArray
 
-    def gas_fvf(self, pressure: Numeric) -> Numeric:
-        p_safe = self._clip(pressure, 50.0, self.initial_pressure * 1.2)
-        
-        # Z-Factor: Z = aP^2 + bP + 1
-        z = self._z_factor_a * p_safe**2 + self._z_factor_b * p_safe + 1.0
-        
-        # Bg = Bgi * (Pi/P) * (Z/Zi)
-        z_ratio = z / self.z_factor_initial
-        p_ratio = self.initial_pressure / p_safe
-        return self.gas_fvf_initial * p_ratio * z_ratio
+    _knots_tensor: pt.TensorConstant = field(init=False, repr=False)
+    _oil_coeffs_tensor: pt.TensorConstant = field(init=False, repr=False)
+    _gas_coeffs_tensor: pt.TensorConstant = field(init=False, repr=False)
+    _rs_coeffs_tensor: pt.TensorConstant = field(init=False, repr=False)
+    _oil_at_initial: float = field(init=False, repr=False)
+    _gas_at_initial: float = field(init=False, repr=False)
+    _rs_at_initial: float = field(init=False, repr=False)
 
-    def solution_gor(self, pressure: Numeric) -> Numeric:
-        p_safe = self._clip(pressure, 50.0, self.initial_pressure * 1.2)
-        
-        p_frac = p_safe / self.bubble_point
-        rs_below = self.solution_gor_initial * (p_frac ** self.rs_exponent_below_pb)
-        
-        is_above = p_safe >= self.bubble_point
-        
-        return self._switch(is_above, self.solution_gor_initial, rs_below)
+    def __post_init__(self) -> None:
+        dtype = pt_config.floatX
+        knots = np.asarray(self.knots, dtype=dtype)
+        oil = np.asarray(self.oil_coefficients, dtype=dtype)
+        gas = np.asarray(self.gas_coefficients, dtype=dtype)
+        rs = np.asarray(self.rs_coefficients, dtype=dtype)
+
+        object.__setattr__(self, "_knots_tensor", pt.as_tensor_variable(knots))
+        object.__setattr__(self, "_oil_coeffs_tensor", pt.as_tensor_variable(oil))
+        object.__setattr__(self, "_gas_coeffs_tensor", pt.as_tensor_variable(gas))
+        object.__setattr__(self, "_rs_coeffs_tensor", pt.as_tensor_variable(rs))
+
+        oil_init = float(self.oil_fvf_numpy(self.params.initial_pressure)[0])
+        gas_init = float(self.gas_fvf_numpy(self.params.initial_pressure)[0])
+        rs_init = float(self.solution_gor_numpy(self.params.initial_pressure)[0])
+
+        object.__setattr__(self, "_oil_at_initial", oil_init)
+        object.__setattr__(self, "_gas_at_initial", gas_init)
+        object.__setattr__(self, "_rs_at_initial", rs_init)
+
+    @property
+    def oil_at_initial(self) -> float:
+        return self._oil_at_initial
+
+    @property
+    def gas_at_initial(self) -> float:
+        return self._gas_at_initial
+
+    @property
+    def rs_at_initial(self) -> float:
+        return self._rs_at_initial
+
+    def oil_fvf(self, pressure: pt.TensorVariable) -> Tuple[pt.TensorVariable, pt.TensorVariable]:
+        """Return formation volume factor and derivative."""
+
+        return _evaluate_piecewise_tensor(
+            pressure, self._knots_tensor, self._oil_coeffs_tensor
+        )
+
+    def gas_fvf(self, pressure: pt.TensorVariable) -> Tuple[pt.TensorVariable, pt.TensorVariable]:
+        return _evaluate_piecewise_tensor(
+            pressure, self._knots_tensor, self._gas_coeffs_tensor
+        )
+
+    def solution_gor(self, pressure: pt.TensorVariable) -> Tuple[pt.TensorVariable, pt.TensorVariable]:
+        return _evaluate_piecewise_tensor(
+            pressure, self._knots_tensor, self._rs_coeffs_tensor
+        )
+
+    def oil_fvf_numpy(self, pressure: FloatArray | float) -> Tuple[FloatArray, FloatArray]:
+        return _evaluate_piecewise_numpy(pressure, self.knots, self.oil_coefficients)
+
+    def gas_fvf_numpy(self, pressure: FloatArray | float) -> Tuple[FloatArray, FloatArray]:
+        return _evaluate_piecewise_numpy(pressure, self.knots, self.gas_coefficients)
+
+    def solution_gor_numpy(self, pressure: FloatArray | float) -> Tuple[FloatArray, FloatArray]:
+        return _evaluate_piecewise_numpy(pressure, self.knots, self.rs_coefficients)
+
+    def evaluate_all(
+        self, pressure: pt.TensorVariable
+    ) -> Tuple[pt.TensorVariable, pt.TensorVariable, pt.TensorVariable, pt.TensorVariable, pt.TensorVariable, pt.TensorVariable]:
+        """Return Bo, dBo/dp, Bg, dBg/dp, Rs, dRs/dp in a single call."""
+
+        bo, dbo = self.oil_fvf(pressure)
+        bg, dbg = self.gas_fvf(pressure)
+        rs, drs = self.solution_gor(pressure)
+        return bo, dbo, bg, dbg, rs, drs
+
+
+def _oil_fvf_exact(params: MaterialBalancePVT, pressure: FloatArray) -> FloatArray:
+    p_safe = np.clip(np.asarray(pressure, dtype=float), params.pressure_min, params.pressure_max)
+
+    delta_above = params.initial_pressure - p_safe
+    bo_above = params.oil_fvf_initial * np.exp(params.oil_compress_above_pb * delta_above)
+
+    delta_below = params.bubble_point - p_safe
+    bo_at_pb = params.oil_fvf_initial * np.exp(params.oil_compress_above_pb * (params.initial_pressure - params.bubble_point))
+    bo_below = np.maximum(1.0, bo_at_pb - params.oil_shrinkage_below_pb * delta_below)
+
+    is_above = p_safe >= params.bubble_point
+    return np.where(is_above, bo_above, bo_below)
+
+
+def _gas_fvf_exact(params: MaterialBalancePVT, pressure: FloatArray) -> FloatArray:
+    p_safe = np.clip(np.asarray(pressure, dtype=float), params.pressure_min, params.pressure_max)
+
+    Pi, Zi, P_min = params.initial_pressure, params.z_factor_initial, params.p_at_min_z
+    denom = Pi**2 - 2.0 * P_min * Pi
+    if abs(denom) < 1e-9:
+        raise ValueError("Unstable Z-factor parameters (singularity in quadratic fit).")
+
+    z_a = (Zi - 1.0) / denom
+    z_b = -2.0 * z_a * P_min
+
+    z = z_a * p_safe**2 + z_b * p_safe + 1.0
+    z_ratio = z / Zi
+    p_ratio = Pi / p_safe
+    return params.gas_fvf_initial * p_ratio * z_ratio
+
+
+def _solution_gor_exact(params: MaterialBalancePVT, pressure: FloatArray) -> FloatArray:
+    p_safe = np.clip(np.asarray(pressure, dtype=float), params.pressure_min, params.pressure_max)
+    p_frac = p_safe / params.bubble_point
+    rs_below = params.solution_gor_initial * np.power(p_frac, params.rs_exponent_below_pb)
+    is_above = p_safe >= params.bubble_point
+    return np.where(is_above, params.solution_gor_initial, rs_below)
+
+
+def _piecewise_cubic_coefficients(knots: FloatArray, values: FloatArray) -> FloatArray:
+    interp = PchipInterpolator(knots, values, extrapolate=False)
+    slopes = interp.derivative()(knots)
+
+    n_segments = knots.size - 1
+    coeffs = np.empty((n_segments, 4), dtype=float)
+
+    for i in range(n_segments):
+        x0 = knots[i]
+        x1 = knots[i + 1]
+        h = x1 - x0
+        if h <= 0:
+            raise ValueError("Pressure grid must be strictly increasing for spline coefficients.")
+
+        y0 = values[i]
+        y1 = values[i + 1]
+        m0 = slopes[i]
+        m1 = slopes[i + 1]
+
+        a = 2.0 * y0 - 2.0 * y1 + h * (m0 + m1)
+        b = -3.0 * y0 + 3.0 * y1 - 2.0 * h * m0 - h * m1
+        c = h * m0
+        d = y0
+
+        coeffs[i, 0] = a / (h**3)
+        coeffs[i, 1] = b / (h**2)
+        coeffs[i, 2] = m0
+        coeffs[i, 3] = d
+
+    return coeffs
+
+
+def _evaluate_piecewise_tensor(
+    pressure: pt.TensorVariable,
+    knots: pt.TensorVariable,
+    coeffs: pt.TensorVariable,
+) -> Tuple[pt.TensorVariable, pt.TensorVariable]:
+    """Evaluate cubic spline (value, derivative) using PyTensor ops only."""
+
+    p = pt.clip(pressure, knots[0], knots[-1])
+    init_val = coeffs[0, 3] + pt.zeros_like(p)
+    init_grad = coeffs[0, 2] + pt.zeros_like(p)
+
+    def step(knot_low, coeff_low, prev_val, prev_grad):
+        dx = p - knot_low
+        seg_val = ((coeff_low[0] * dx + coeff_low[1]) * dx + coeff_low[2]) * dx + coeff_low[3]
+        seg_grad = (3.0 * coeff_low[0] * dx + 2.0 * coeff_low[1]) * dx + coeff_low[2]
+        use_seg = pt.ge(p, knot_low)
+        next_val = pt.switch(use_seg, seg_val, prev_val)
+        next_grad = pt.switch(use_seg, seg_grad, prev_grad)
+        return next_val, next_grad
+
+    # Broadcast over the spline segments to locate the active interval without Scan.
+    p_flat = pt.reshape(p, (-1,))
+    knots_low = knots[:-1]
+    # Count how many knot intervals are below each pressure sample.
+    ge_mask = pt.ge(pt.expand_dims(p_flat, 1), knots_low)
+    idx = pt.sum(ge_mask, axis=1, dtype="int64") - 1
+
+    max_idx = coeffs.shape[0] - 1
+    idx = pt.maximum(pt.minimum(idx, max_idx), 0)
+
+    base_pressure = knots[idx]
+    coeff_sel = coeffs[idx]
+    dx = p_flat - base_pressure
+
+    vals_flat = ((coeff_sel[:, 0] * dx + coeff_sel[:, 1]) * dx + coeff_sel[:, 2]) * dx + coeff_sel[:, 3]
+    grads_flat = (3.0 * coeff_sel[:, 0] * dx + 2.0 * coeff_sel[:, 1]) * dx + coeff_sel[:, 2]
+
+    vals = pt.reshape(vals_flat, p.shape)
+    grads = pt.reshape(grads_flat, p.shape)
+    return vals, grads
+
+
+def _evaluate_piecewise_numpy(
+    pressure: FloatArray | float,
+    knots: FloatArray,
+    coeffs: FloatArray,
+) -> Tuple[FloatArray, FloatArray]:
+    p = np.clip(np.asarray(pressure, dtype=float), knots[0], knots[-1])
+    idx = np.searchsorted(knots, p, side="right") - 1
+    idx = np.clip(idx, 0, coeffs.shape[0] - 1)
+
+    dx = p - knots[idx]
+    vals = ((coeffs[idx, 0] * dx + coeffs[idx, 1]) * dx + coeffs[idx, 2]) * dx + coeffs[idx, 3]
+    grads = (3.0 * coeffs[idx, 0] * dx + 2.0 * coeffs[idx, 1]) * dx + coeffs[idx, 2]
+    return vals, grads
