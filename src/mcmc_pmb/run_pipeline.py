@@ -18,17 +18,31 @@ def main(sampler: str = "metropolis") -> None:
     data_path = root / "data" / "production_data.csv"
     out_dir = root / "outputs"
 
+    aquifer_true = 15.0  # Bbl/day/psi
+    max_prod_true = 12.0e6 # 12 MMSTB production
+    
     if not data_path.exists():
         print(f"Generating synthetic data at {data_path}...")
-        generate_synthetic_dataset(output_csv=data_path, max_prod=18.0) # Explicit physics limit
-
+        generate_synthetic_dataset(
+            output_csv=data_path, 
+            max_prod=max_prod_true, 
+            aquifer_J=aquifer_true
+        )
     data = pd.read_csv(data_path)
     
     # Setup
     pvt_params = MaterialBalancePVT()
     model = MaterialBalanceModel(pvt_params=pvt_params)
     dataset = prepare_production_dataset(data)
-    prior = PriorParameters(100.0, 0.4, 60.0, 0.13, -0.1)
+    prior = PriorParameters(
+        mean_N=100.0, # interpreted as MMSTB
+        mean_m=0.4,
+        mean_J=np.log(max(aquifer_true, 1e-9)), 
+        std_N=60.0,
+        std_m=0.13,
+        std_J=1.0, # Wider prior for J
+        correlation=-0.5, # Expect strong negative correlation now
+    )
     sigma = 100.0
 
     print(f"Running {sampler.upper()} sampler...")
@@ -37,8 +51,11 @@ def main(sampler: str = "metropolis") -> None:
         config = NUTSConfig(n_samples=2000, n_tune=1000, target_accept=0.9)
     else:
         config = MetropolisHastingsConfig(
-            n_iterations=10000, burn_in=2000, thinning=5, 
-            proposal_std=(3.0, 0.03), use_adaptive=True
+            n_iterations=10000,
+            burn_in=2000,
+            thinning=5,
+            proposal_std=(3.0, 0.03, 0.3),
+            use_adaptive=True,
         )
 
     result = run_sampler(config, prior, dataset, model, sigma, sampler_type=sampler.lower())
@@ -47,7 +64,7 @@ def main(sampler: str = "metropolis") -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     chain = result.chain
     
-    np.savetxt(out_dir / "samples.csv", chain, delimiter=",", header="N,m")
+    np.savetxt(out_dir / "samples.csv", chain, delimiter=",", header="N,m,J")
     
     map_est = estimate_map(chain, result.log_posteriors_chain)
     summary = summarize_chain(chain, map_estimate=map_est)

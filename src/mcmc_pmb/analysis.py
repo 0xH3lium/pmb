@@ -128,7 +128,7 @@ def plot_posterior_predictive(
 
 def summarize_chain(
     chain: np.ndarray,
-    parameter_names: Sequence[str] = ("N", "m"),
+    parameter_names: Sequence[str] = ("N", "m", "J"),
     map_estimate: Optional[Sequence[float]] = None,
 ) -> pd.DataFrame:
     """Generates summary statistics with ArviZ."""
@@ -152,7 +152,7 @@ def make_diagnostics(
     output_dir: Path,
     log_posteriors: Optional[np.ndarray] = None,
     map_estimate: Optional[Sequence[float]] = None,
-    parameter_names: Sequence[str] = ("N", "m"),
+    parameter_names: Sequence[str] = ("N", "m", "J"),
 ) -> None:
     """
     Generate advanced ArviZ diagnostic plots with customized scientific styling.

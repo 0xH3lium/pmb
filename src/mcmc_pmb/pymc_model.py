@@ -20,24 +20,19 @@ def _build_pymc_model(
     model: MaterialBalanceModel,
     sigma: float,
 ) -> pm.Model:
-    cov = np.array(
-        [
-            [prior.std_N**2, prior.correlation * prior.std_N * prior.std_m],
-            [prior.correlation * prior.std_N * prior.std_m, prior.std_m**2],
-        ],
-        dtype=float,
-    )
-    mu = np.array([prior.mean_N, prior.mean_m], dtype=float)
+    cov = prior.to_covariance_matrix()
+    mu = prior.to_mean_vector()
     chol = np.linalg.cholesky(cov)
 
     chol_tensor = pt.as_tensor_variable(chol)
     mu_tensor = pt.as_tensor_variable(mu)
 
     with pm.Model() as pymc_model:
-        theta_raw = pm.MvNormal("theta_raw", mu=mu_tensor, chol=chol_tensor, shape=2)
+        theta_raw = pm.MvNormal("theta_raw", mu=mu_tensor, chol=chol_tensor, shape=3)
 
         N = pm.Deterministic("N", theta_raw[0])
         m_linear = pm.Deterministic("m_linear", theta_raw[1])
+        J = pm.Deterministic("J", pt.exp(theta_raw[2]))
 
         gas_in_place = pm.Deterministic(
             "gas_in_place", N * pt.maximum(m_linear, 0.0)
@@ -45,9 +40,9 @@ def _build_pymc_model(
         m_effective = pm.Deterministic(
             "m", pt.maximum(gas_in_place / pt.maximum(N, 1e-6), 0.0)
         )
-        theta = pm.Deterministic("theta", pt.stack([N, m_effective]))
+        theta = pm.Deterministic("theta", pt.stack([N, m_effective, J]))
 
-        pressures = model.symbolic_pressures(theta[0], theta[1], dataset)
+        pressures = model.symbolic_pressures(theta[0], theta[1], J, dataset)
         pm.Normal("obs", mu=pressures, sigma=sigma, observed=dataset.pressure_measured)
 
     return pymc_model
@@ -74,7 +69,8 @@ def run_sampler(
                 random_seed=config.random_seed,
                 progressbar=True,
             )
-            raw_chain = idata.posterior["theta"].values.reshape(-1, 2)
+            raw_chain = idata.posterior["theta"].values.reshape(-1, 3)
+            theta_raw_chain = idata.posterior["theta_raw"].values.reshape(-1, 3)
             accepted = np.ones(len(raw_chain), dtype=bool)
             burn_in = config.n_tune
             thinning = 1
@@ -101,10 +97,14 @@ def run_sampler(
 
             if "warmup_posterior" in idata and "theta" in idata.warmup_posterior:
                 warm = idata.warmup_posterior["theta"].values[0]
+                warm_raw = idata.warmup_posterior["theta_raw"].values[0]
                 post = idata.posterior["theta"].values[0]
+                post_raw = idata.posterior["theta_raw"].values[0]
                 raw_chain = np.vstack([warm, post])
+                theta_raw_chain = np.vstack([warm_raw, post_raw])
             else:
                 raw_chain = idata.posterior["theta"].values[0]
+                theta_raw_chain = idata.posterior["theta_raw"].values[0]
 
             accepted = np.concatenate(([True], np.any(raw_chain[1:] != raw_chain[:-1], axis=1)))
             burn_in = config.burn_in
@@ -123,16 +123,12 @@ def run_sampler(
             else:
                 ll_flat = ll_vals[0]
 
-        cov = np.array(
-            [
-                [prior.std_N**2, prior.correlation * prior.std_N * prior.std_m],
-                [prior.correlation * prior.std_N * prior.std_m, prior.std_m**2],
-            ],
-            dtype=float,
-        )
-        mu = np.array([prior.mean_N, prior.mean_m], dtype=float)
+        cov = prior.to_covariance_matrix()
+        mu = prior.to_mean_vector()
 
-        log_priors = multivariate_normal.logpdf(raw_chain, mean=mu, cov=cov)
+        theta_raw_chain = theta_raw_chain.reshape(-1, 3)
+
+        log_priors = multivariate_normal.logpdf(theta_raw_chain, mean=mu, cov=cov)
         log_posteriors = log_priors + ll_flat
 
     return MetropolisHastingsResult(

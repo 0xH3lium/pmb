@@ -15,7 +15,7 @@ class MetropolisHastingsConfig:
     n_iterations: int = 50000
     burn_in: int = 10000
     thinning: int = 1
-    proposal_std: Sequence[float] = (5.0, 0.05)
+    proposal_std: Sequence[float] = (5.0, 0.05, 0.1)
     random_seed: Optional[int] = 42
     use_adaptive: bool = False
     initial_covariance: Optional[Sequence[Sequence[float]]] = None
@@ -29,8 +29,8 @@ class MetropolisHastingsConfig:
             raise ValueError("burn_in must be non-negative")
         if self.thinning <= 0:
             raise ValueError("thinning must be positive")
-        if len(self.proposal_std) != 2:
-            raise ValueError("proposal_std must contain two elements")
+        if len(self.proposal_std) != 3:
+            raise ValueError("proposal_std must contain three elements")
         if self.use_adaptive:
             if self.adaptation_start < 0:
                 raise ValueError("adaptation_start must be non-negative")

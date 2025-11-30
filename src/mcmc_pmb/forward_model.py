@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, Sequence, Union
 
 import numpy as np
@@ -20,6 +20,8 @@ class ProductionDataset:
     time_days: np.ndarray
     Np: np.ndarray
     Rp: np.ndarray
+    Wp: np.ndarray
+    step_days: np.ndarray
     pressure_measured: np.ndarray
     pressure_truth: Optional[np.ndarray] = None
 
@@ -39,10 +41,21 @@ def prepare_production_dataset(data: Union[pd.DataFrame, ProductionDataset]) -> 
 
     df = data.sort_values("time_days") if not data["time_days"].is_monotonic_increasing else data
 
+    time_days = df["time_days"].to_numpy(dtype=float)
+    step_days = np.diff(time_days, prepend=time_days[0])
+    step_days = np.maximum(step_days, 0.0)
+
+    if "Wp" in df:
+        wp = df["Wp"].to_numpy(dtype=float)
+    else:
+        wp = np.zeros_like(time_days, dtype=float)
+
     return ProductionDataset(
-        time_days=df["time_days"].to_numpy(dtype=float),
+        time_days=time_days,
         Np=df["Np"].to_numpy(dtype=float),
         Rp=df["Rp"].to_numpy(dtype=float),
+        Wp=wp,
+        step_days=step_days,
         pressure_measured=df["Pressure_measured"].to_numpy(dtype=float),
         pressure_truth=df["Pressure_truth"].to_numpy(dtype=float) if "Pressure_truth" in df else None,
     )
@@ -61,6 +74,8 @@ class SolverContext:
     Boi: float
     Bgi: float
     Rsi: float
+    aquifer_index: float
+    Bw: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +85,8 @@ class MaterialBalanceModel:
     connate_water_saturation: float = 0.20
     pore_compressibility: float = 4.0e-6
     water_compressibility: float = 3.0e-6
+    aquifer_index: float = 0.0
+    water_fvf: float = 1.0
     pressure_bounds: tuple[float, float] = (100.0, 5000.0)
     newton_steps: int = 6
     newton_damping: float = 0.8
@@ -102,6 +119,8 @@ class MaterialBalanceModel:
             Boi=engine.oil_at_initial,
             Bgi=max(engine.gas_at_initial, 1e-12),
             Rsi=engine.rs_at_initial,
+            aquifer_index=self.aquifer_index,
+            Bw=self.water_fvf,
         )
 
         object.__setattr__(self, "_context", context)
@@ -111,6 +130,7 @@ class MaterialBalanceModel:
         self,
         N: pt.TensorVariable,
         m: pt.TensorVariable,
+        aquifer_index: pt.TensorVariable,
         dataset: ProductionDataset,
     ) -> pt.TensorVariable:
         """Return PyTensor graph for predicted pressures given symbolic parameters."""
@@ -118,33 +138,43 @@ class MaterialBalanceModel:
         dtype = pt_config.floatX
         Np = pt.as_tensor_variable(dataset.Np.astype(dtype))
         Rp = pt.as_tensor_variable(dataset.Rp.astype(dtype))
+        Wp = pt.as_tensor_variable(dataset.Wp.astype(dtype))
+        step_days = pt.as_tensor_variable(dataset.step_days.astype(dtype))
 
-        context = self._context
+        context = replace(self._context, aquifer_index=aquifer_index)
 
-        def step(np_t, rp_t, prev_pressure, N_param, m_param):
-            next_pressure = _newton_solve(
+        def step(np_t, rp_t, wp_t, dt_t, prev_pressure, prev_we, N_param, m_param, aquifer_param):
+            next_pressure, next_we = _newton_solve(
                 prev_pressure,
+                prev_we,
+                dt_t,
                 N_param,
                 m_param,
                 np_t,
                 rp_t,
+                wp_t,
                 context,
+                aquifer_param,
             )
-            return next_pressure
+            return next_pressure, next_we
+
+        initial_pressure_tensor = pt.as_tensor_variable(np.array(context.initial_pressure, dtype=dtype))
+        initial_we_tensor = pt.as_tensor_variable(np.array(0.0, dtype=dtype))
 
         outputs, _ = scan(
             step,
-            sequences=[Np, Rp],
-            outputs_info=pt.as_tensor_variable(np.array(context.initial_pressure, dtype=dtype)),
-            non_sequences=[N, m],
+            sequences=[Np, Rp, Wp, step_days],
+            outputs_info=[initial_pressure_tensor, initial_we_tensor],
+            non_sequences=[N, m, aquifer_index],
             strict=False,
         )
 
-        return outputs
+        pressures, _ = outputs
+        return pressures
 
     def make_predict_function(self, dataset: ProductionDataset):
         theta = pt.vector("theta", dtype=pt_config.floatX)
-        pressures = self.symbolic_pressures(theta[0], theta[1], dataset)
+        pressures = self.symbolic_pressures(theta[0], theta[1], theta[2], dataset)
         return function([theta], pressures)
 
     def predict_pressures(
@@ -157,26 +187,41 @@ class MaterialBalanceModel:
         )
 
         theta = np.asarray(parameters, dtype=float)
+        if theta.size != 3:
+            raise ValueError("MaterialBalanceModel expects parameter vector of length 3 (N, m, J).")
         predictor = self.make_predict_function(dataset)
         return predictor(theta.astype(pt_config.floatX))
 
 
 def _newton_solve(
     initial_guess: pt.TensorVariable,
+    we_prev: pt.TensorVariable,
+    dt: pt.TensorVariable,
     N: pt.TensorVariable,
     m: pt.TensorVariable,
     Np_t: pt.TensorVariable,
     Rp_t: pt.TensorVariable,
+    Wp_t: pt.TensorVariable,
     context: SolverContext,
-) -> pt.TensorVariable:
+    aquifer_index: pt.TensorVariable,
+) -> tuple[pt.TensorVariable, pt.TensorVariable]:
     """Run a fixed number of Newton iterations in PyTensor graph form."""
 
     p = initial_guess
     min_bound, max_bound = context.pressure_bounds
 
     for _ in range(context.newton_steps):
-        residual, derivative = _material_balance_residual(
-            p, N, m, Np_t, Rp_t, context
+        residual, derivative, _ = _material_balance_residual(
+            p,
+            N,
+            m,
+            Np_t,
+            Rp_t,
+            Wp_t,
+            we_prev,
+            dt,
+            context,
+            aquifer_index,
         )
 
         jac_safe = pt.switch(
@@ -194,7 +239,22 @@ def _newton_solve(
         p = pt.where(pt.isnan(p), initial_guess, p)
 
     valid = pt.and_(pt.gt(N, 0.0), pt.ge(m, 0.0))
-    return pt.switch(valid, p, initial_guess)
+    pressure_final = pt.switch(valid, p, initial_guess)
+    _, _, we_total = _material_balance_residual(
+        pressure_final,
+        N,
+        m,
+        Np_t,
+        Rp_t,
+        Wp_t,
+        we_prev,
+        dt,
+        context,
+        aquifer_index,
+    )
+
+    we_final = pt.switch(valid, we_total, we_prev)
+    return pressure_final, we_final
 
 
 def _material_balance_residual(
@@ -203,27 +263,38 @@ def _material_balance_residual(
     m: pt.TensorVariable,
     Np_t: pt.TensorVariable,
     Rp_t: pt.TensorVariable,
+    Wp_t: pt.TensorVariable,
+    We_accumulated: pt.TensorVariable,
+    dt: pt.TensorVariable,
     context: SolverContext,
-) -> tuple[pt.TensorVariable, pt.TensorVariable]:
+    aquifer_index: pt.TensorVariable,
+) -> tuple[pt.TensorVariable, pt.TensorVariable, pt.TensorVariable]:
     engine = context.engine
 
     Bo, dBo, Bg, dBg, Rs, dRs = engine.evaluate_all(pressure)
 
+    #Scale N from MMSTB to STB
+    N_stb = N * 1.0e6
+
     delta_p = context.initial_pressure - pressure
-    comp_coeff = N * context.Boi * context.eff_compressibility
+    comp_coeff = N_stb * context.Boi * context.eff_compressibility
     comp_term = pt.switch(pt.gt(delta_p, 0.0), comp_coeff * delta_p, 0.0)
     dcomp_dp = pt.switch(pt.gt(delta_p, 0.0), -comp_coeff, 0.0)
 
-    lhs = Np_t * (Bo + (Rp_t - Rs) * Bg)
+    lhs = Np_t * (Bo + (Rp_t - Rs) * Bg) + Wp_t * context.Bw
     dL_dp = Np_t * (dBo + (Rp_t - Rs) * dBg - dRs * Bg)
 
-    rhs_fluid = N * ((Bo - context.Boi) + (context.Rsi - Rs) * Bg)
-    drhs_fluid = N * (dBo - dRs * Bg + (context.Rsi - Rs) * dBg)
+    rhs_fluid = N_stb * ((Bo - context.Boi) + (context.Rsi - Rs) * Bg)
+    drhs_fluid = N_stb * (dBo - dRs * Bg + (context.Rsi - Rs) * dBg)
 
-    rhs_gas = N * m * context.Boi * ((Bg / context.Bgi) - 1.0)
-    drhs_gas = N * m * context.Boi * (dBg / context.Bgi)
+    rhs_gas = N_stb * m * context.Boi * ((Bg / context.Bgi) - 1.0)
+    drhs_gas = N_stb * m * context.Boi * (dBg / context.Bgi)
 
-    residual = lhs - (rhs_fluid + rhs_gas + comp_term)
-    derivative = dL_dp - (drhs_fluid + drhs_gas + dcomp_dp)
+    delta_we = aquifer_index * (context.initial_pressure - pressure) * dt
+    we_total = We_accumulated + delta_we
+    residual = lhs - (rhs_fluid + rhs_gas + comp_term + we_total)
 
-    return residual, derivative
+    dWe_dp = -aquifer_index * dt
+    derivative = dL_dp - (drhs_fluid + drhs_gas + dcomp_dp + dWe_dp)
+
+    return residual, derivative, we_total
