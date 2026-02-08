@@ -29,7 +29,6 @@ def log_likelihood(
     except RuntimeError:
         return -np.inf
 
-
     if np.any(np.isnan(predicted)):
         return -np.inf
     

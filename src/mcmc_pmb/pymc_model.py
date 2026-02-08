@@ -42,8 +42,35 @@ def _build_pymc_model(
         )
         theta = pm.Deterministic("theta", pt.stack([N, m_effective, J]))
 
-        pressures = model.symbolic_pressures(theta[0], theta[1], J, dataset)
-        pm.Normal("obs", mu=pressures, sigma=sigma, observed=dataset.pressure_measured)
+        # Errors-in-Variables: latent true cumulative oil and GOR
+        n_steps = dataset.n_steps
+        # Use relative 5% noise; enforce minimum to avoid zero variance early
+        Np_true = pm.Normal(
+            "Np_true",
+            mu=pt.as_tensor_variable(dataset.Np),
+            sigma=pt.as_tensor_variable(np.maximum(dataset.Np * 0.05, 1e-6)),
+            shape=n_steps,
+        )
+        Rp_true = pm.Normal(
+            "Rp_true",
+            mu=pt.as_tensor_variable(dataset.Rp),
+            sigma=pt.as_tensor_variable(np.maximum(dataset.Rp * 0.05, 1e-6)),
+            shape=n_steps,
+        )
+
+        pressures = model.symbolic_pressures(
+            theta[0], theta[1], J, dataset, Np_seq=Np_true, Rp_seq=Rp_true
+        )
+
+        # Robust likelihood via StudentT
+        nu = pm.Exponential("nu", 1 / 5)
+        pm.StudentT(
+            "obs",
+            nu=nu,
+            mu=pressures,
+            sigma=sigma,
+            observed=dataset.pressure_measured,
+        )
 
     return pymc_model
 

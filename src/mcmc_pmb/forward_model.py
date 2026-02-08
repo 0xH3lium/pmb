@@ -132,12 +132,23 @@ class MaterialBalanceModel:
         m: pt.TensorVariable,
         aquifer_index: pt.TensorVariable,
         dataset: ProductionDataset,
+        Np_seq: pt.TensorVariable | None = None,
+        Rp_seq: pt.TensorVariable | None = None,
     ) -> pt.TensorVariable:
         """Return PyTensor graph for predicted pressures given symbolic parameters."""
 
         dtype = pt_config.floatX
-        Np = pt.as_tensor_variable(dataset.Np.astype(dtype))
-        Rp = pt.as_tensor_variable(dataset.Rp.astype(dtype))
+        # Allow overriding production sequences with latent variables for EIV modeling
+        Np = (
+            pt.as_tensor_variable(dataset.Np.astype(dtype))
+            if Np_seq is None
+            else pt.as_tensor_variable(Np_seq)
+        )
+        Rp = (
+            pt.as_tensor_variable(dataset.Rp.astype(dtype))
+            if Rp_seq is None
+            else pt.as_tensor_variable(Rp_seq)
+        )
         Wp = pt.as_tensor_variable(dataset.Wp.astype(dtype))
         step_days = pt.as_tensor_variable(dataset.step_days.astype(dtype))
 
