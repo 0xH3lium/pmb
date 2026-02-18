@@ -7,10 +7,10 @@ from typing import Any
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
-from scipy.stats import multivariate_normal
+from scipy.stats import norm, truncnorm
 
 from .forward_model import MaterialBalanceModel, ProductionDataset, prepare_production_dataset
-from .mcmc import MetropolisHastingsConfig, MetropolisHastingsResult, NUTSConfig
+from .mcmc import MetropolisHastingsResult
 from .priors import PriorParameters
 
 
@@ -20,31 +20,26 @@ def _build_pymc_model(
     model: MaterialBalanceModel,
     sigma: float,
 ) -> pm.Model:
-    cov = prior.to_covariance_matrix()
-    mu = prior.to_mean_vector()
-    chol = np.linalg.cholesky(cov)
-
-    chol_tensor = pt.as_tensor_variable(chol)
-    mu_tensor = pt.as_tensor_variable(mu)
+    rho = float(np.clip(prior.correlation, -0.999, 0.999))
+    sigma_m_cond = float(prior.std_m * np.sqrt(1.0 - rho**2))
+    if sigma_m_cond <= 0.0:
+        raise ValueError("Invalid prior: std_m and correlation produce non-positive conditional sigma")
 
     with pm.Model() as pymc_model:
-        theta_raw = pm.MvNormal("theta_raw", mu=mu_tensor, chol=chol_tensor, shape=3)
-
-        N = pm.Deterministic("N", theta_raw[0])
-        m_linear = pm.Deterministic("m_linear", theta_raw[1])
-        J = pm.Deterministic("J", pt.exp(theta_raw[2]))
-
-        gas_in_place = pm.Deterministic(
-            "gas_in_place", N * pt.maximum(m_linear, 0.0)
+        N = pm.Normal("N", mu=prior.mean_N, sigma=prior.std_N)
+        m_cond_mu = pm.Deterministic(
+            "m_cond_mu",
+            prior.mean_m + rho * (prior.std_m / prior.std_N) * (N - prior.mean_N),
         )
-        m_effective = pm.Deterministic(
-            "m", pt.maximum(gas_in_place / pt.maximum(N, 1e-6), 0.0)
-        )
-        theta = pm.Deterministic("theta", pt.stack([N, m_effective, J]))
+        m = pm.TruncatedNormal("m", mu=m_cond_mu, sigma=sigma_m_cond, lower=0.0)
+        log_J = pm.Normal("log_J", mu=prior.mean_J, sigma=prior.std_J)
+        J = pm.Deterministic("J", pt.exp(log_J))
+
+        theta = pm.Deterministic("theta", pt.stack([N, m, J]))
+        pm.Deterministic("theta_raw", pt.stack([N, m, log_J]))
 
         # Errors-in-Variables: latent true cumulative oil and GOR
         n_steps = dataset.n_steps
-        # Use relative 5% noise; enforce minimum to avoid zero variance early
         Np_true = pm.Normal(
             "Np_true",
             mu=pt.as_tensor_variable(dataset.Np),
@@ -57,7 +52,6 @@ def _build_pymc_model(
             sigma=pt.as_tensor_variable(np.maximum(dataset.Rp * 0.05, 1e-6)),
             shape=n_steps,
         )
-
         pressures = model.symbolic_pressures(
             theta[0], theta[1], J, dataset, Np_seq=Np_true, Rp_seq=Rp_true
         )
@@ -99,18 +93,22 @@ def run_sampler(
             raw_chain = idata.posterior["theta"].values.reshape(-1, 3)
             theta_raw_chain = idata.posterior["theta_raw"].values.reshape(-1, 3)
             accepted = np.ones(len(raw_chain), dtype=bool)
-            burn_in = config.n_tune
+            burn_in = 0
             thinning = 1
 
         else:
             proposal_std = np.array(config.proposal_std, dtype=float)
             S = np.diag(proposal_std**2)
-            step = pm.Metropolis(S=S)
+            step = [
+                pm.Metropolis(vars=[pm_model["N"], pm_model["m"], pm_model["log_J"]], S=S),
+                pm.Metropolis(vars=[pm_model["Np_true"]]),
+                pm.Metropolis(vars=[pm_model["Rp_true"]]),
+                pm.Metropolis(vars=[pm_model["nu"]]),
+            ]
 
-            draws = config.n_iterations
             tune = config.burn_in if config.use_adaptive else 0
-            if config.use_adaptive:
-                draws -= tune
+            draws = config.n_iterations - tune if config.use_adaptive else config.n_iterations
+            discard_tuned_samples = bool(config.use_adaptive)
 
             idata = pm.sample(
                 draws=draws,
@@ -119,22 +117,14 @@ def run_sampler(
                 chains=1,
                 progressbar=True,
                 random_seed=config.random_seed,
-                discard_tuned_samples=False,
+                discard_tuned_samples=discard_tuned_samples,
             )
 
-            if "warmup_posterior" in idata and "theta" in idata.warmup_posterior:
-                warm = idata.warmup_posterior["theta"].values[0]
-                warm_raw = idata.warmup_posterior["theta_raw"].values[0]
-                post = idata.posterior["theta"].values[0]
-                post_raw = idata.posterior["theta_raw"].values[0]
-                raw_chain = np.vstack([warm, post])
-                theta_raw_chain = np.vstack([warm_raw, post_raw])
-            else:
-                raw_chain = idata.posterior["theta"].values[0]
-                theta_raw_chain = idata.posterior["theta_raw"].values[0]
+            raw_chain = idata.posterior["theta"].values.reshape(-1, 3)
+            theta_raw_chain = idata.posterior["theta_raw"].values.reshape(-1, 3)
 
             accepted = np.concatenate(([True], np.any(raw_chain[1:] != raw_chain[:-1], axis=1)))
-            burn_in = config.burn_in
+            burn_in = 0 if config.use_adaptive else config.burn_in
             thinning = config.thinning
 
         pm.compute_log_likelihood(idata)
@@ -143,19 +133,22 @@ def run_sampler(
         if sampler_type == "nuts":
             ll_flat = ll_vals.flatten()
         else:
-            if "warmup_log_likelihood" in idata:
-                ll_warm = idata.warmup_log_likelihood["obs"].sum(dim="obs_dim_0").values[0]
-                ll_post = ll_vals[0]
-                ll_flat = np.concatenate([ll_warm, ll_post])
-            else:
-                ll_flat = ll_vals[0]
-
-        cov = prior.to_covariance_matrix()
-        mu = prior.to_mean_vector()
+            ll_flat = ll_vals.flatten()
 
         theta_raw_chain = theta_raw_chain.reshape(-1, 3)
+        N_chain = theta_raw_chain[:, 0]
+        m_chain = theta_raw_chain[:, 1]
+        log_J_chain = theta_raw_chain[:, 2]
 
-        log_priors = multivariate_normal.logpdf(theta_raw_chain, mean=mu, cov=cov)
+        rho = float(np.clip(prior.correlation, -0.999, 0.999))
+        sigma_m_cond = float(prior.std_m * np.sqrt(1.0 - rho**2))
+        m_cond_mu_chain = prior.mean_m + rho * (prior.std_m / prior.std_N) * (N_chain - prior.mean_N)
+
+        log_prior_N = norm.logpdf(N_chain, loc=prior.mean_N, scale=prior.std_N)
+        a = (0.0 - m_cond_mu_chain) / sigma_m_cond
+        log_prior_m = truncnorm.logpdf(m_chain, a=a, b=np.inf, loc=m_cond_mu_chain, scale=sigma_m_cond)
+        log_prior_log_J = norm.logpdf(log_J_chain, loc=prior.mean_J, scale=prior.std_J)
+        log_priors = log_prior_N + log_prior_m + log_prior_log_J
         log_posteriors = log_priors + ll_flat
 
     return MetropolisHastingsResult(
