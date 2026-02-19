@@ -30,7 +30,9 @@ class ProductionDataset:
         return self.time_days.size
 
 
-def prepare_production_dataset(data: Union[pd.DataFrame, ProductionDataset]) -> ProductionDataset:
+def prepare_production_dataset(
+    data: Union[pd.DataFrame, ProductionDataset],
+) -> ProductionDataset:
     if isinstance(data, ProductionDataset):
         return data
 
@@ -39,7 +41,11 @@ def prepare_production_dataset(data: Union[pd.DataFrame, ProductionDataset]) -> 
         missing = required - set(data.columns)
         raise ValueError(f"Missing columns: {missing}")
 
-    df = data.sort_values("time_days") if not data["time_days"].is_monotonic_increasing else data
+    df = (
+        data.sort_values("time_days")
+        if not data["time_days"].is_monotonic_increasing
+        else data
+    )
 
     time_days = df["time_days"].to_numpy(dtype=float)
     step_days = np.diff(time_days, prepend=time_days[0])
@@ -57,7 +63,9 @@ def prepare_production_dataset(data: Union[pd.DataFrame, ProductionDataset]) -> 
         Wp=wp,
         step_days=step_days,
         pressure_measured=df["Pressure_measured"].to_numpy(dtype=float),
-        pressure_truth=df["Pressure_truth"].to_numpy(dtype=float) if "Pressure_truth" in df else None,
+        pressure_truth=df["Pressure_truth"].to_numpy(dtype=float)
+        if "Pressure_truth" in df
+        else None,
     )
 
 
@@ -94,13 +102,16 @@ class MaterialBalanceModel:
     jacobian_epsilon: float = 1e-9
 
     _context: SolverContext = field(init=False, repr=False)
+    _single_step_fn: callable = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         engine = self.pvt_engine or self.pvt_params.build_engine()
         lower_bound = max(self.pvt_params.pressure_min, self.pressure_bounds[0])
         upper_bound = min(self.pvt_params.pressure_max, self.pressure_bounds[1])
         if lower_bound >= upper_bound:
-            raise ValueError("Invalid pressure bounds after intersecting with PVT limits.")
+            raise ValueError(
+                "Invalid pressure bounds after intersecting with PVT limits."
+            )
 
         swi = self.connate_water_saturation
         ceff_num = (self.water_compressibility * swi) + self.pore_compressibility
@@ -154,7 +165,17 @@ class MaterialBalanceModel:
 
         context = replace(self._context, aquifer_index=aquifer_index)
 
-        def step(np_t, rp_t, wp_t, dt_t, prev_pressure, prev_we, N_param, m_param, aquifer_param):
+        def step(
+            np_t,
+            rp_t,
+            wp_t,
+            dt_t,
+            prev_pressure,
+            prev_we,
+            N_param,
+            m_param,
+            aquifer_param,
+        ):
             next_pressure, next_we = _newton_solve(
                 prev_pressure,
                 prev_we,
@@ -169,7 +190,9 @@ class MaterialBalanceModel:
             )
             return next_pressure, next_we
 
-        initial_pressure_tensor = pt.as_tensor_variable(np.array(context.initial_pressure, dtype=dtype))
+        initial_pressure_tensor = pt.as_tensor_variable(
+            np.array(context.initial_pressure, dtype=dtype)
+        )
         initial_we_tensor = pt.as_tensor_variable(np.array(0.0, dtype=dtype))
 
         outputs, _ = scan(
@@ -189,7 +212,9 @@ class MaterialBalanceModel:
         return function([theta], pressures)
 
     def predict_pressures(
-        self, parameters: Sequence[float], production_data: Union[ProductionDataset, pd.DataFrame]
+        self,
+        parameters: Sequence[float],
+        production_data: Union[ProductionDataset, pd.DataFrame],
     ) -> np.ndarray:
         dataset = (
             production_data
@@ -199,9 +224,63 @@ class MaterialBalanceModel:
 
         theta = np.asarray(parameters, dtype=float)
         if theta.size != 3:
-            raise ValueError("MaterialBalanceModel expects parameter vector of length 3 (N, m, J).")
+            raise ValueError(
+                "MaterialBalanceModel expects parameter vector of length 3 (N, m, J)."
+            )
         predictor = self.make_predict_function(dataset)
         return predictor(theta.astype(pt_config.floatX))
+
+    def _build_single_step_fn(self):
+        if self._single_step_fn is not None:
+            return self._single_step_fn
+
+        dtype = pt_config.floatX
+        p_init = pt.scalar("p_init", dtype=dtype)
+        we_prev = pt.scalar("we_prev", dtype=dtype)
+        dt = pt.scalar("dt", dtype=dtype)
+        N = pt.scalar("N", dtype=dtype)
+        m = pt.scalar("m", dtype=dtype)
+        Np_t = pt.scalar("Np_t", dtype=dtype)
+        Rp_t = pt.scalar("Rp_t", dtype=dtype)
+        Wp_t = pt.scalar("Wp_t", dtype=dtype)
+        aquifer_idx = pt.scalar("aquifer_idx", dtype=dtype)
+
+        p_next, we_next = _newton_solve(
+            p_init, we_prev, dt, N, m, Np_t, Rp_t, Wp_t, self._context, aquifer_idx
+        )
+        fn = function(
+            [p_init, we_prev, dt, N, m, Np_t, Rp_t, Wp_t, aquifer_idx],
+            [p_next, we_next],
+        )
+        object.__setattr__(self, "_single_step_fn", fn)
+        return fn
+
+    def solve_single_step(
+        self,
+        initial_pressure: float,
+        we_prev: float,
+        dt: float,
+        N: float,
+        m: float,
+        Np: float,
+        Rp: float,
+        Wp: float,
+        aquifer_index: float | None = None,
+    ) -> tuple[float, float]:
+        aquifer = aquifer_index if aquifer_index is not None else self.aquifer_index
+        fn = self._build_single_step_fn()
+        p_next, we_next = fn(
+            float(initial_pressure),
+            float(we_prev),
+            float(dt),
+            float(N),
+            float(m),
+            float(Np),
+            float(Rp),
+            float(Wp),
+            float(aquifer),
+        )
+        return float(p_next), float(we_next)
 
 
 def _newton_solve(
@@ -237,7 +316,11 @@ def _newton_solve(
 
         jac_safe = pt.switch(
             pt.abs(derivative) < context.jacobian_epsilon,
-            pt.switch(pt.lt(derivative, 0), -context.jacobian_epsilon, context.jacobian_epsilon),
+            pt.switch(
+                pt.lt(derivative, 0),
+                -context.jacobian_epsilon,
+                context.jacobian_epsilon,
+            ),
             derivative,
         )
 
@@ -284,7 +367,7 @@ def _material_balance_residual(
 
     Bo, dBo, Bg, dBg, Rs, dRs = engine.evaluate_all(pressure)
 
-    #Scale N from MMSTB to STB
+    # Scale N from MMSTB to STB
     N_stb = N * 1.0e6
 
     delta_p = context.initial_pressure - pressure

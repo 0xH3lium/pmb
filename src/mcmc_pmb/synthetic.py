@@ -31,85 +31,6 @@ def _calculate_instantaneous_gor(
     return rs_at_p + excess_gor
 
 
-def _solve_pressure_numpy(
-    model: MaterialBalanceModel,
-    N: float, # MMSTB
-    m: float,
-    Np: float,
-    Rp: float,
-    Wp: float,
-    We_prev: float,
-    dt: float,
-    initial_guess: float,
-) -> tuple[float, float]:
-    context = model._context
-    engine = context.engine
-
-    p = float(initial_guess)
-    lower, upper = context.pressure_bounds
-    
-    # SCALE N
-    N_stb = N * 1.0e6
-
-    for _ in range(context.newton_steps):
-        # ... (PVT evaluations remain the same)
-        bo, dbo = engine.oil_fvf_numpy(p)
-        bg, dbg = engine.gas_fvf_numpy(p)
-        rs, drs = engine.solution_gor_numpy(p)
-        
-        # Cast to float (same as before)
-        bo, bg, rs = float(bo), float(bg), float(rs)
-        dbo, dbg, drs = float(dbo), float(dbg), float(drs)
-
-        delta_p = context.initial_pressure - p
-        
-        # Use N_stb here
-        comp_coeff = N_stb * context.Boi * context.eff_compressibility
-        if delta_p > 0.0:
-            comp_term = comp_coeff * delta_p
-            dcomp = -comp_coeff
-        else:
-            comp_term = 0.0
-            dcomp = 0.0
-
-        lhs = Np * (bo + (Rp - rs) * bg) + Wp * context.Bw
-        dL_dp = Np * (dbo + (Rp - rs) * dbg - drs * bg)
-
-        # Use N_stb here
-        rhs_fluid = N_stb * ((bo - context.Boi) + (context.Rsi - rs) * bg)
-        drhs_fluid = N_stb * (dbo - drs * bg + (context.Rsi - rs) * dbg)
-
-        rhs_gas = N_stb * m * context.Boi * ((bg / context.Bgi) - 1.0)
-        drhs_gas = N_stb * m * context.Boi * (dbg / context.Bgi)
-
-        delta_we = model.aquifer_index * (context.initial_pressure - p) * dt
-        we_total = We_prev + delta_we
-
-        residual = lhs - (rhs_fluid + rhs_gas + comp_term + we_total)
-        
-        # ... (Derivative and Newton update remain the same)
-        dWe_dp = -model.aquifer_index * dt
-        derivative = dL_dp - (drhs_fluid + drhs_gas + dcomp + dWe_dp)
-
-        if abs(derivative) < model.jacobian_epsilon:
-            derivative = np.copysign(model.jacobian_epsilon, derivative or 1.0)
-
-        p_candidate = p - model.newton_damping * (residual / derivative)
-        p_candidate = float(np.clip(p_candidate, lower, upper))
-        
-        # ... (Convergence check logic remains same)
-        if abs(residual) < model.newton_tol:
-            delta_we_candidate = model.aquifer_index * (context.initial_pressure - p_candidate) * dt
-            we_total_candidate = We_prev + delta_we_candidate
-            return p_candidate, we_total_candidate
-
-        p = p_candidate
-
-    delta_we = model.aquifer_index * (context.initial_pressure - p) * dt
-    we_total = We_prev + delta_we
-    return p, we_total
-
-
 def generate_synthetic_dataset(
     output_csv: Optional[Path] = None,
     n_steps: int = 24,
@@ -118,9 +39,8 @@ def generate_synthetic_dataset(
     gas_prod_coefficient: float = 0.6,
     random_seed: int = 2026,
     max_prod: float = 12.0e6,  # CHANGED: 12 Million STB (approx 10% recovery)
-    aquifer_J: float = 15.0,   # CHANGED: Stronger aquifer for a bigger field
+    aquifer_J: float = 15.0,  # CHANGED: Stronger aquifer for a bigger field
 ) -> pd.DataFrame:
-    
     rng = np.random.default_rng(random_seed)
 
     params = MaterialBalancePVT()
@@ -144,7 +64,9 @@ def generate_synthetic_dataset(
     # Prescribe a smooth water-oil ratio curve to ensure rising water production.
     transition = 0.6 * time_days[-1]
     wor_max = 1.2
-    wor_curve = wor_max / (1.0 + np.exp(-(time_days - transition) / max(transition * 0.15, 1e-6)))
+    wor_curve = wor_max / (
+        1.0 + np.exp(-(time_days - transition) / max(transition * 0.15, 1e-6))
+    )
     wor_curve = np.clip(wor_curve, 0.0, wor_max)
     wp_schedule = np.maximum.accumulate(cum_oil_schedule * wor_curve)
     wp_schedule[0] = 0.0
@@ -162,21 +84,22 @@ def generate_synthetic_dataset(
 
         current_np = cum_oil_schedule[i]
         current_rp = (
-            cum_gas_produced / current_np if current_np > 0 else params.solution_gor_initial
+            cum_gas_produced / current_np
+            if current_np > 0
+            else params.solution_gor_initial
         )
         cumulative_gors[i] = current_rp
         current_wp = wp_schedule[i]
 
-        current_pressure, we_cumulative = _solve_pressure_numpy(
-            model,
+        current_pressure, we_cumulative = model.solve_single_step(
+            initial_pressure=current_pressure,
+            we_prev=we_cumulative,
+            dt=dt,
             N=true_parameters[0],
             m=true_parameters[1],
             Np=current_np,
             Rp=current_rp,
             Wp=current_wp,
-            We_prev=we_cumulative,
-            dt=dt,
-            initial_guess=current_pressure,
         )
         true_pressures[i] = current_pressure
         cumulative_wp[i] = current_wp
