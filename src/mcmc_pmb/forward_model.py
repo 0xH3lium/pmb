@@ -371,7 +371,7 @@ def _material_balance_residual(
     N_stb = N * 1.0e6
 
     delta_p = context.initial_pressure - pressure
-    comp_coeff = N_stb * context.Boi * context.eff_compressibility
+    comp_coeff = N_stb * context.Boi * (1.0 + m) * context.eff_compressibility
     comp_term = pt.switch(pt.gt(delta_p, 0.0), comp_coeff * delta_p, 0.0)
     dcomp_dp = pt.switch(pt.gt(delta_p, 0.0), -comp_coeff, 0.0)
 
