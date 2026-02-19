@@ -40,27 +40,43 @@ def _build_pymc_model(
 
         # Errors-in-Variables: latent true cumulative oil and GOR
         n_steps = dataset.n_steps
-        np_obs_sigma = pt.as_tensor_variable(np.maximum(np.abs(dataset.Np) * 0.05, 1e-6))
-        np_increments = np.diff(np.concatenate(([0.0], dataset.Np)))
-        np_increment_floor = np.maximum(np_increments, 1e-6)
+
+        # Monotonic cumulative production via positive increments
+        dNp_obs = np.diff(np.concatenate(([0.0], dataset.Np)))
+        dNp_mu = np.maximum(dNp_obs, 1e-6)
         dNp_true = pm.LogNormal(
             "dNp_true",
-            mu=pt.as_tensor_variable(np.log(np_increment_floor)),
-            sigma=0.5,
+            mu=pt.as_tensor_variable(np.log(dNp_mu)),
+            sigma=0.35,
             shape=n_steps,
         )
         Np_true = pm.Deterministic("Np_true", pt.cumsum(dNp_true))
-        pm.Normal("Np_obs", mu=Np_true, sigma=np_obs_sigma, observed=dataset.Np)
-        rp_obs_sigma = pt.as_tensor_variable(np.maximum(np.abs(dataset.Rp) * 0.05, 1e-6))
-        rp_level = float(np.maximum(np.nanmedian(dataset.Rp), 1e-6))
-        rp_scale = float(np.maximum(np.nanstd(dataset.Rp), rp_level * 0.5, 1e-3))
+        pm.Normal(
+            "Np_obs",
+            mu=Np_true,
+            sigma=pt.as_tensor_variable(np.maximum(np.abs(dataset.Np) * 0.05, 1e-6)),
+            observed=dataset.Np,
+        )
+
+        # EIV for Gas-Oil Ratio (Rp)
+        Rp_mu = np.maximum(dataset.Rp, 1e-6)
+        
+        # 1. Prior for the latent true Rp (LogNormal ensures Rp > 0)
         Rp_true = pm.LogNormal(
             "Rp_true",
-            mu=pt.as_tensor_variable(np.log(rp_level)),
-            sigma=float(np.log1p(rp_scale / rp_level)),
+            mu=pt.as_tensor_variable(np.log(Rp_mu)),
+            sigma=0.35,  # Prior uncertainty on the true Rp
             shape=n_steps,
         )
-        pm.Normal("Rp_obs", mu=Rp_true, sigma=rp_obs_sigma, observed=dataset.Rp)
+        
+        # 2. Likelihood of observing the measured Rp given the true Rp
+        pm.Normal(
+            "Rp_obs",
+            mu=Rp_true,
+            sigma=pt.as_tensor_variable(np.maximum(dataset.Rp * 0.05, 1e-6)),
+            observed=dataset.Rp,
+        )
+        
         pressures = model.symbolic_pressures(
             theta[0], theta[1], J, dataset, Np_seq=Np_true, Rp_seq=Rp_true
         )
