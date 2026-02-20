@@ -40,11 +40,14 @@ def generate_synthetic_dataset(
     random_seed: int = 2026,
     max_prod: float = 12.0e6,  # CHANGED: 12 Million STB (approx 10% recovery)
     aquifer_J: float = 15.0,  # CHANGED: Stronger aquifer for a bigger field
+    aquifer_C: float = 1.0e6,  # Aquifer capacity in rb/psi
 ) -> pd.DataFrame:
     rng = np.random.default_rng(random_seed)
 
     params = MaterialBalancePVT()
-    model = MaterialBalanceModel(pvt_params=params, aquifer_index=aquifer_J)
+    model = MaterialBalanceModel(
+        pvt_params=params, aquifer_index=aquifer_J, aquifer_capacity=aquifer_C
+    )
     engine = model.pvt_engine
 
     time_days = np.linspace(0.0, 2400.0, num=n_steps)

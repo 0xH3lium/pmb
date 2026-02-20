@@ -36,24 +36,26 @@ STYLE_CONFIG = {
 }
 
 COLORS = {
-    "data": "#1f2937",        # Dark slate
-    "model_median": "#2563eb", # Royal Blue
-    "band_50": "#60a5fa",     # Lighter Blue
-    "band_95": "#bfdbfe",     # Very Light Blue
-    "residual": "#ef4444",    # Red
-    "map": "#d97706",         # Amber
+    "data": "#1f2937",  # Dark slate
+    "model_median": "#2563eb",  # Royal Blue
+    "band_50": "#60a5fa",  # Lighter Blue
+    "band_95": "#bfdbfe",  # Very Light Blue
+    "residual": "#ef4444",  # Red
+    "map": "#d97706",  # Amber
 }
+
 
 def _apply_style():
     """Applies custom scientific plotting style."""
     plt.rcParams.update(STYLE_CONFIG)
+
 
 def plot_posterior_predictive(
     chain: np.ndarray,
     model: Any,
     production_data: pd.DataFrame | ProductionDataset,
     output_dir: Path,
-    n_curves: int = 500
+    n_curves: int = 500,
 ) -> None:
     """
     Generates a dual-panel scientific plot:
@@ -63,14 +65,15 @@ def plot_posterior_predictive(
     _apply_style()
     dataset = prepare_production_dataset(production_data)
     n_samples = chain.shape[0]
-    if n_samples == 0: return
+    if n_samples == 0:
+        return
 
     # Select random indices for the ensemble
     rng = np.random.default_rng()
     indices = rng.choice(n_samples, size=min(n_curves, n_samples), replace=False)
-    
+
     predict_fn = model.make_predict_function(dataset)
-    
+
     # Generate ensemble predictions
     preds = np.empty((len(indices), dataset.n_steps))
     for i, idx in enumerate(indices):
@@ -95,19 +98,32 @@ def plot_posterior_predictive(
 
     # --- Main Plot ---
     # 95% Confidence Interval
-    ax_main.fill_between(t, p2_5, p97_5, color=COLORS["band_95"], alpha=0.6, label="95% CI")
+    ax_main.fill_between(
+        t, p2_5, p97_5, color=COLORS["band_95"], alpha=0.6, label="95% CI"
+    )
     # 50% Confidence Interval
-    ax_main.fill_between(t, p25, p75, color=COLORS["band_50"], alpha=0.8, label="50% CI")
+    ax_main.fill_between(
+        t, p25, p75, color=COLORS["band_50"], alpha=0.8, label="50% CI"
+    )
     # Median Line
     ax_main.plot(t, p50, color=COLORS["model_median"], lw=2, label="Posterior Median")
     # Observed Data
     ax_main.errorbar(
-        t, y_obs, yerr=0.0, fmt='o', color=COLORS["data"], 
-        markersize=4, label="Measured Data", elinewidth=1, zorder=10
+        t,
+        y_obs,
+        yerr=0.0,
+        fmt="o",
+        color=COLORS["data"],
+        markersize=4,
+        label="Measured Data",
+        elinewidth=1,
+        zorder=10,
     )
 
     ax_main.set_ylabel("Pressure (psi)")
-    ax_main.set_title("Posterior Predictive Check & Uncertainty Quantification", fontweight="bold")
+    ax_main.set_title(
+        "Posterior Predictive Check & Uncertainty Quantification", fontweight="bold"
+    )
     ax_main.legend(loc="upper right")
     plt.setp(ax_main.get_xticklabels(), visible=False)
 
@@ -117,42 +133,47 @@ def plot_posterior_predictive(
     ax_resid.axhline(0, color="black", lw=1, linestyle="--")
     ax_resid.set_ylabel("Residuals")
     ax_resid.set_xlabel("Time (days)")
-    
+
     # Add RMSE annotation
     rmse = np.sqrt(np.mean(residuals**2))
-    ax_resid.text(0.02, 0.05, f"RMSE: {rmse:.2f} psi", transform=ax_resid.transAxes, fontsize=10)
+    ax_resid.text(
+        0.02, 0.05, f"RMSE: {rmse:.2f} psi", transform=ax_resid.transAxes, fontsize=10
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_dir / "ppc_scientific.png", bbox_inches="tight")
     plt.close(fig)
 
+
 def summarize_chain(
     chain: np.ndarray,
-    parameter_names: Sequence[str] = ("N", "m", "J"),
+    parameter_names: Sequence[str] = ("N", "m", "J", "C"),
     map_estimate: Optional[Sequence[float]] = None,
 ) -> pd.DataFrame:
     """Generates summary statistics with ArviZ."""
     data_dict = {name: chain[:, i] for i, name in enumerate(parameter_names)}
     # Convert to InferenceData for robust handling
     idata = az.from_dict(posterior=data_dict)
-    
+
     summary = az.summary(idata, kind="stats", hdi_prob=0.90)
-    
+
     if map_estimate is not None:
         summary["MAP"] = map_estimate
-        
+
     return summary.reset_index().rename(columns={"index": "parameter"})
+
 
 def estimate_map(chain: np.ndarray, log_posteriors: np.ndarray) -> np.ndarray:
     max_idx = np.argmax(log_posteriors)
     return chain[max_idx]
+
 
 def make_diagnostics(
     chain: np.ndarray,
     output_dir: Path,
     log_posteriors: Optional[np.ndarray] = None,
     map_estimate: Optional[Sequence[float]] = None,
-    parameter_names: Sequence[str] = ("N", "m", "J"),
+    parameter_names: Sequence[str] = ("N", "m", "J", "C"),
 ) -> None:
     """
     Generate advanced ArviZ diagnostic plots with customized scientific styling.
@@ -173,9 +194,9 @@ def make_diagnostics(
         compact=False,
         lines=[("mean", {}, "C1")] if map_estimate is None else None,
         plot_kwargs={"color": COLORS["model_median"], "alpha": 0.8},
-        fill_kwargs={"color": COLORS["band_95"], "alpha": 0.4}
+        fill_kwargs={"color": COLORS["band_95"], "alpha": 0.4},
     )
-    
+
     # Customize ArviZ output (which returns numpy array of axes)
     fig = axes.flatten()[0].figure
     fig.suptitle("MCMC Trace & Marginal Densities", fontsize=16, y=1.02)
@@ -190,13 +211,13 @@ def make_diagnostics(
         marginals=True,
         point_estimate="median",
         kde_kwargs={
-            "fill_last": False, 
+            "fill_last": False,
             "contourf_kwargs": {"cmap": "Blues"},
-            "hdi_probs": [0.3, 0.6, 0.9] # Plot 30, 60, 90% probability masses
+            "hdi_probs": [0.3, 0.6, 0.9],  # Plot 30, 60, 90% probability masses
         },
         marginal_kwargs={"color": COLORS["data"]},
         textsize=12,
-        figsize=(8, 8)
+        figsize=(8, 8),
     )
     plt.gcf().suptitle("Joint Posterior Density", y=1.02, fontsize=14)
     plt.gcf().savefig(output_dir / "joint_density_contours.png", bbox_inches="tight")
@@ -209,7 +230,7 @@ def make_diagnostics(
         point_estimate="mean",
         color=COLORS["band_50"],
         textsize=11,
-        ref_val=None
+        ref_val=None,
     )
     plt.gcf().suptitle("Posterior Marginals (95% HDI)", y=1.05, fontsize=14)
     plt.gcf().savefig(output_dir / "posterior_marginals.png", bbox_inches="tight")
@@ -218,20 +239,25 @@ def make_diagnostics(
     # 4. Log Posterior Convergence
     if log_posteriors is not None:
         fig, ax = plt.subplots(figsize=(10, 4))
-        
+
         # Raw trace
         ax.plot(log_posteriors, color="gray", lw=0.5, alpha=0.4, label="Log Prob")
-        
+
         # Rolling mean (to show convergence trend)
         window = min(len(log_posteriors) // 20, 500)
         if window > 1:
             rolling_mean = pd.Series(log_posteriors).rolling(window).mean()
-            ax.plot(rolling_mean, color=COLORS["data"], lw=1.5, label=f"Rolling Mean (n={window})")
+            ax.plot(
+                rolling_mean,
+                color=COLORS["data"],
+                lw=1.5,
+                label=f"Rolling Mean (n={window})",
+            )
 
         ax.set_xlabel("Iteration")
         ax.set_ylabel("Log Posterior")
         ax.set_title("Optimization / Sampling Convergence", fontweight="bold")
         ax.legend()
-        
+
         fig.savefig(output_dir / "log_posterior_convergence.png", bbox_inches="tight")
         plt.close(fig)

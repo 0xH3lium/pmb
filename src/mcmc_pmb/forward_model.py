@@ -83,6 +83,7 @@ class SolverContext:
     Bgi: float
     Rsi: float
     aquifer_index: float
+    aquifer_capacity: float
     Bw: float
 
 
@@ -94,6 +95,7 @@ class MaterialBalanceModel:
     pore_compressibility: float = 4.0e-6
     water_compressibility: float = 3.0e-6
     aquifer_index: float = 0.0
+    aquifer_capacity: float = 1.0e6
     water_fvf: float = 1.0
     pressure_bounds: tuple[float, float] = (100.0, 5000.0)
     newton_steps: int = 6
@@ -131,6 +133,7 @@ class MaterialBalanceModel:
             Bgi=max(engine.gas_at_initial, 1e-12),
             Rsi=engine.rs_at_initial,
             aquifer_index=self.aquifer_index,
+            aquifer_capacity=self.aquifer_capacity,
             Bw=self.water_fvf,
         )
 
@@ -142,6 +145,7 @@ class MaterialBalanceModel:
         N: pt.TensorVariable,
         m: pt.TensorVariable,
         aquifer_index: pt.TensorVariable,
+        aquifer_capacity: pt.TensorVariable,
         dataset: ProductionDataset,
         Np_seq: pt.TensorVariable | None = None,
         Rp_seq: pt.TensorVariable | None = None,
@@ -163,7 +167,11 @@ class MaterialBalanceModel:
         Wp = pt.as_tensor_variable(dataset.Wp.astype(dtype))
         step_days = pt.as_tensor_variable(dataset.step_days.astype(dtype))
 
-        context = replace(self._context, aquifer_index=aquifer_index)
+        context = replace(
+            self._context,
+            aquifer_index=aquifer_index,
+            aquifer_capacity=aquifer_capacity,
+        )
 
         def step(
             np_t,
@@ -174,7 +182,8 @@ class MaterialBalanceModel:
             prev_we,
             N_param,
             m_param,
-            aquifer_param,
+            aquifer_J,
+            aquifer_C,
         ):
             next_pressure, next_we = _newton_solve(
                 prev_pressure,
@@ -186,7 +195,8 @@ class MaterialBalanceModel:
                 rp_t,
                 wp_t,
                 context,
-                aquifer_param,
+                aquifer_J,
+                aquifer_C,
             )
             return next_pressure, next_we
 
@@ -199,7 +209,7 @@ class MaterialBalanceModel:
             step,
             sequences=[Np, Rp, Wp, step_days],
             outputs_info=[initial_pressure_tensor, initial_we_tensor],
-            non_sequences=[N, m, aquifer_index],
+            non_sequences=[N, m, aquifer_index, aquifer_capacity],
             strict=False,
         )
 
@@ -208,7 +218,9 @@ class MaterialBalanceModel:
 
     def make_predict_function(self, dataset: ProductionDataset):
         theta = pt.vector("theta", dtype=pt_config.floatX)
-        pressures = self.symbolic_pressures(theta[0], theta[1], theta[2], dataset)
+        pressures = self.symbolic_pressures(
+            theta[0], theta[1], theta[2], theta[3], dataset
+        )
         return function([theta], pressures)
 
     def predict_pressures(
@@ -223,9 +235,9 @@ class MaterialBalanceModel:
         )
 
         theta = np.asarray(parameters, dtype=float)
-        if theta.size != 3:
+        if theta.size != 4:
             raise ValueError(
-                "MaterialBalanceModel expects parameter vector of length 3 (N, m, J)."
+                "MaterialBalanceModel expects parameter vector of length 4 (N, m, J, C)."
             )
         predictor = self.make_predict_function(dataset)
         return predictor(theta.astype(pt_config.floatX))
@@ -243,13 +255,24 @@ class MaterialBalanceModel:
         Np_t = pt.scalar("Np_t", dtype=dtype)
         Rp_t = pt.scalar("Rp_t", dtype=dtype)
         Wp_t = pt.scalar("Wp_t", dtype=dtype)
-        aquifer_idx = pt.scalar("aquifer_idx", dtype=dtype)
+        aquifer_J = pt.scalar("aquifer_J", dtype=dtype)
+        aquifer_C = pt.scalar("aquifer_C", dtype=dtype)
 
         p_next, we_next = _newton_solve(
-            p_init, we_prev, dt, N, m, Np_t, Rp_t, Wp_t, self._context, aquifer_idx
+            p_init,
+            we_prev,
+            dt,
+            N,
+            m,
+            Np_t,
+            Rp_t,
+            Wp_t,
+            self._context,
+            aquifer_J,
+            aquifer_C,
         )
         fn = function(
-            [p_init, we_prev, dt, N, m, Np_t, Rp_t, Wp_t, aquifer_idx],
+            [p_init, we_prev, dt, N, m, Np_t, Rp_t, Wp_t, aquifer_J, aquifer_C],
             [p_next, we_next],
         )
         object.__setattr__(self, "_single_step_fn", fn)
@@ -266,8 +289,12 @@ class MaterialBalanceModel:
         Rp: float,
         Wp: float,
         aquifer_index: float | None = None,
+        aquifer_capacity: float | None = None,
     ) -> tuple[float, float]:
-        aquifer = aquifer_index if aquifer_index is not None else self.aquifer_index
+        aquifer_J = aquifer_index if aquifer_index is not None else self.aquifer_index
+        aquifer_C = (
+            aquifer_capacity if aquifer_capacity is not None else self.aquifer_capacity
+        )
         fn = self._build_single_step_fn()
         p_next, we_next = fn(
             float(initial_pressure),
@@ -278,7 +305,8 @@ class MaterialBalanceModel:
             float(Np),
             float(Rp),
             float(Wp),
-            float(aquifer),
+            float(aquifer_J),
+            float(aquifer_C),
         )
         return float(p_next), float(we_next)
 
@@ -294,6 +322,7 @@ def _newton_solve(
     Wp_t: pt.TensorVariable,
     context: SolverContext,
     aquifer_index: pt.TensorVariable,
+    aquifer_capacity: pt.TensorVariable,
 ) -> tuple[pt.TensorVariable, pt.TensorVariable]:
     """Run a fixed number of Newton iterations in PyTensor graph form."""
 
@@ -312,6 +341,7 @@ def _newton_solve(
             dt,
             context,
             aquifer_index,
+            aquifer_capacity,
         )
 
         jac_safe = pt.switch(
@@ -345,6 +375,7 @@ def _newton_solve(
         dt,
         context,
         aquifer_index,
+        aquifer_capacity,
     )
 
     we_final = pt.switch(valid, we_total, we_prev)
@@ -362,6 +393,7 @@ def _material_balance_residual(
     dt: pt.TensorVariable,
     context: SolverContext,
     aquifer_index: pt.TensorVariable,
+    aquifer_capacity: pt.TensorVariable,
 ) -> tuple[pt.TensorVariable, pt.TensorVariable, pt.TensorVariable]:
     engine = context.engine
 
@@ -384,11 +416,24 @@ def _material_balance_residual(
     rhs_gas = N_stb * m * context.Boi * ((Bg / context.Bgi) - 1.0)
     drhs_gas = N_stb * m * context.Boi * (dBg / context.Bgi)
 
-    delta_we = aquifer_index * (context.initial_pressure - pressure) * dt
+    # Fetkovich aquifer model
+    # p_a_prev = pi - We_prev / C
+    # decline_factor = exp(-J * dt / C)
+    # p_a_new = p_res + (p_a_prev - p_res) * decline_factor
+    # delta_We = C * (p_a_prev - p_a_new)
+    C_safe = pt.maximum(aquifer_capacity, 1e-6)
+    J_safe = pt.maximum(aquifer_index, 0.0)
+
+    p_a_prev = context.initial_pressure - We_accumulated / C_safe
+    decline_factor = pt.exp(-J_safe * dt / C_safe)
+    p_a_new = pressure + (p_a_prev - pressure) * decline_factor
+    delta_we = C_safe * (p_a_prev - p_a_new)
+
     we_total = We_accumulated + delta_we
     residual = lhs - (rhs_fluid + rhs_gas + comp_term + we_total)
 
-    dWe_dp = -aquifer_index * dt
+    # dWe_dp = -C * (1 - exp(-J * dt / C))
+    dWe_dp = -C_safe * (1.0 - decline_factor)
     derivative = dL_dp - (drhs_fluid + drhs_gas + dcomp_dp + dWe_dp)
 
     return residual, derivative, we_total
