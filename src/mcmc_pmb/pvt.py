@@ -37,8 +37,8 @@ class MaterialBalancePVT:
     solution_gor_initial: float = 650.0
     oil_compress_above_pb: float = 12e-6
     oil_shrinkage_below_pb: float = 1.5e-4
-    z_factor_initial: float = 0.88
-    p_at_min_z: float = 2200.0
+    reservoir_temperature_f: float = 180.0
+    gas_specific_gravity: float = 0.65
     rs_exponent_below_pb: float = 0.85
     pressure_min: float = 50.0
     pressure_multiplier: float = 1.2
@@ -47,6 +47,10 @@ class MaterialBalancePVT:
     def __post_init__(self) -> None:
         if self.bubble_point > self.initial_pressure:
             raise ValueError("Bubble point pressure cannot exceed initial pressure.")
+        if self.reservoir_temperature_f <= -459.67:
+            raise ValueError("reservoir_temperature_f must be above absolute zero.")
+        if self.gas_specific_gravity <= 0.0:
+            raise ValueError("gas_specific_gravity must be positive.")
         if self.spline_size < 4:
             raise ValueError("spline_size must be at least 4 points for cubic splines.")
 
@@ -180,19 +184,82 @@ def _oil_fvf_exact(params: MaterialBalancePVT, pressure: FloatArray) -> FloatArr
 
 def _gas_fvf_exact(params: MaterialBalancePVT, pressure: FloatArray) -> FloatArray:
     p_safe = np.clip(np.asarray(pressure, dtype=float), params.pressure_min, params.pressure_max)
-
-    Pi, Zi, P_min = params.initial_pressure, params.z_factor_initial, params.p_at_min_z
-    denom = Pi**2 - 2.0 * P_min * Pi
-    if abs(denom) < 1e-9:
-        raise ValueError("Unstable Z-factor parameters (singularity in quadratic fit).")
-
-    z_a = (Zi - 1.0) / denom
-    z_b = -2.0 * z_a * P_min
-
-    z = z_a * p_safe**2 + z_b * p_safe + 1.0
-    z_ratio = z / Zi
-    p_ratio = Pi / p_safe
+    pi = params.initial_pressure
+    z = _z_factor_dak(
+        pressure_psia=p_safe,
+        reservoir_temperature_f=params.reservoir_temperature_f,
+        gas_specific_gravity=params.gas_specific_gravity,
+    )
+    zi = float(
+        _z_factor_dak(
+            pressure_psia=np.asarray([params.initial_pressure], dtype=float),
+            reservoir_temperature_f=params.reservoir_temperature_f,
+            gas_specific_gravity=params.gas_specific_gravity,
+        )[0]
+    )
+    z_ratio = z / zi
+    p_ratio = pi / p_safe
     return params.gas_fvf_initial * p_ratio * z_ratio
+
+
+def _z_factor_dak(
+    *,
+    pressure_psia: FloatArray,
+    reservoir_temperature_f: float,
+    gas_specific_gravity: float,
+) -> FloatArray:
+    """Compute gas z-factor with Dranchuk-Abou-Kassem (1975)."""
+
+    # Sutton pseudo-critical correlations.
+    tpc_r = 169.2 + 349.5 * gas_specific_gravity - 74.0 * gas_specific_gravity**2
+    ppc_psia = 756.8 - 131.0 * gas_specific_gravity - 3.6 * gas_specific_gravity**2
+    tpr = (reservoir_temperature_f + 459.67) / tpc_r
+    ppr = np.asarray(pressure_psia, dtype=float) / ppc_psia
+
+    # Dranchuk-Abou-Kassem constants.
+    a1, a2, a3 = 0.3265, -1.0700, -0.5339
+    a4, a5, a6 = 0.01569, -0.05165, 0.5475
+    a7, a8, a9 = -0.7361, 0.1844, 0.1056
+    a10, a11 = 0.6134, 0.7210
+
+    c1 = a1 + a2 / tpr + a3 / tpr**3 + a4 / tpr**4 + a5 / tpr**5
+    c2 = a6 + a7 / tpr + a8 / tpr**2
+    c3 = -a9 * (a7 / tpr + a8 / tpr**2)
+    c4 = a10 / tpr**3
+
+    target = 0.27 * ppr / tpr
+    rho_r = np.maximum(target, 1e-10)
+
+    tolerance = 1e-10
+    max_iter = 100
+    for _ in range(max_iter):
+        exp_term = np.exp(-a11 * rho_r**2)
+        f = (
+            rho_r
+            + c1 * rho_r**2
+            + c2 * rho_r**3
+            + c3 * rho_r**6
+            + c4 * rho_r**3 * (1.0 + a11 * rho_r**2) * exp_term
+            - target
+        )
+        df = (
+            1.0
+            + 2.0 * c1 * rho_r
+            + 3.0 * c2 * rho_r**2
+            + 6.0 * c3 * rho_r**5
+            + c4 * rho_r**2 * exp_term * (3.0 + 3.0 * a11 * rho_r**2 - 2.0 * a11**2 * rho_r**4)
+        )
+
+        # Damped Newton step for numerical stability.
+        df_safe = np.where(np.abs(df) > 1e-14, df, np.where(df >= 0.0, 1e-14, -1e-14))
+        delta = f / df_safe
+        rho_next = np.maximum(rho_r - delta, 1e-10)
+        if np.max(np.abs(rho_next - rho_r)) < tolerance:
+            rho_r = rho_next
+            break
+        rho_r = rho_next
+
+    return 0.27 * ppr / (rho_r * tpr)
 
 
 def _solution_gor_exact(params: MaterialBalancePVT, pressure: FloatArray) -> FloatArray:
