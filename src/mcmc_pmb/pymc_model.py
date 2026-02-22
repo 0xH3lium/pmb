@@ -55,7 +55,7 @@ def _build_pymc_model(
         dNp_true = pm.LogNormal(
             "dNp_true",
             mu=pt.as_tensor_variable(np.log(dNp_mu)),
-            sigma=0.35,
+            sigma=0.05,
             shape=n_steps,
         )
         Np_true = pm.Deterministic("Np_true", pt.cumsum(dNp_true))
@@ -73,7 +73,7 @@ def _build_pymc_model(
         Rp_true = pm.LogNormal(
             "Rp_true",
             mu=pt.as_tensor_variable(np.log(Rp_mu)),
-            sigma=0.35,  # Prior uncertainty on the true Rp
+            sigma=0.05,  # Prior uncertainty on the true Rp
             shape=n_steps,
         )
 
