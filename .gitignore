@@ -15,3 +15,4 @@ outputs/
 .csv
 data/production_data.csv
 data/standard_case.csv
+pvt_derivatives.png

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import numpy as np
 
@@ -47,6 +47,7 @@ class MetropolisHastingsResult:
     accepted: np.ndarray
     burn_in: int
     thinning: int
+    idata: Any | None = None
 
     @property
     def acceptance_rate(self) -> float:

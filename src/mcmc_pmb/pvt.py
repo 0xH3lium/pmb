@@ -40,6 +40,7 @@ class MaterialBalancePVT:
     reservoir_temperature_f: float = 180.0
     gas_specific_gravity: float = 0.65
     rs_exponent_below_pb: float = 0.85
+    smooth_max_sharpness: float = 0.2
     pressure_min: float = 50.0
     pressure_multiplier: float = 1.2
     spline_size: int = 256
@@ -53,6 +54,8 @@ class MaterialBalancePVT:
             raise ValueError("gas_specific_gravity must be positive.")
         if self.spline_size < 4:
             raise ValueError("spline_size must be at least 4 points for cubic splines.")
+        if self.smooth_max_sharpness <= 0.0:
+            raise ValueError("smooth_max_sharpness must be positive.")
 
     @property
     def pressure_max(self) -> float:
@@ -171,15 +174,19 @@ class PVTEngine:
 def _oil_fvf_exact(params: MaterialBalancePVT, pressure: FloatArray) -> FloatArray:
     p_safe = np.clip(np.asarray(pressure, dtype=float), params.pressure_min, params.pressure_max)
 
-    delta_above = params.initial_pressure - p_safe
-    bo_above = params.oil_fvf_initial * np.exp(params.oil_compress_above_pb * delta_above)
+    bo_at_pb = params.oil_fvf_initial * np.exp(
+        params.oil_compress_above_pb * (params.initial_pressure - params.bubble_point)
+    )
 
-    delta_below = params.bubble_point - p_safe
-    bo_at_pb = params.oil_fvf_initial * np.exp(params.oil_compress_above_pb * (params.initial_pressure - params.bubble_point))
-    bo_below = np.maximum(1.0, bo_at_pb - params.oil_shrinkage_below_pb * delta_below)
+    dp_above = _smooth_relu(p_safe - params.bubble_point, params.smooth_max_sharpness)
+    dp_below = _smooth_relu(params.bubble_point - p_safe, params.smooth_max_sharpness)
 
-    is_above = p_safe >= params.bubble_point
-    return np.where(is_above, bo_above, bo_below)
+    bo_raw = (
+        bo_at_pb * np.exp(-params.oil_compress_above_pb * dp_above)
+        - params.oil_shrinkage_below_pb * dp_below
+    )
+
+    return 1.0 + _smooth_relu(bo_raw - 1.0, params.smooth_max_sharpness)
 
 
 def _gas_fvf_exact(params: MaterialBalancePVT, pressure: FloatArray) -> FloatArray:
@@ -264,10 +271,17 @@ def _z_factor_dak(
 
 def _solution_gor_exact(params: MaterialBalancePVT, pressure: FloatArray) -> FloatArray:
     p_safe = np.clip(np.asarray(pressure, dtype=float), params.pressure_min, params.pressure_max)
-    p_frac = p_safe / params.bubble_point
-    rs_below = params.solution_gor_initial * np.power(p_frac, params.rs_exponent_below_pb)
-    is_above = p_safe >= params.bubble_point
-    return np.where(is_above, params.solution_gor_initial, rs_below)
+    dp_below = _smooth_relu(params.bubble_point - p_safe, params.smooth_max_sharpness)
+    p_eff = params.bubble_point - dp_below
+
+    p_frac = p_eff / params.bubble_point
+    return params.solution_gor_initial * np.power(p_frac, params.rs_exponent_below_pb)
+
+def _smooth_relu(x: FloatArray, sharpness: float) -> FloatArray:
+    """Differentiable approximation of max(x, 0) using Softplus."""
+
+    x_arr = np.asarray(x, dtype=float)
+    return np.logaddexp(0.0, sharpness * x_arr) / sharpness
 
 
 def _piecewise_cubic_coefficients(knots: FloatArray, values: FloatArray) -> FloatArray:

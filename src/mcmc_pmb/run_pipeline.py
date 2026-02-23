@@ -58,7 +58,7 @@ def main(sampler: str = "metropolis") -> None:
     print(f"Running {sampler.upper()} sampler...")
 
     if sampler.lower() == "nuts":
-        config = NUTSConfig(n_samples=2000, n_tune=1000, target_accept=0.9, n_chains=2)
+        config = NUTSConfig(n_samples=1000, n_tune=500, target_accept=0.9, n_chains=2)
     else:
         config = MetropolisHastingsConfig(
             n_iterations=10000,
@@ -74,6 +74,10 @@ def main(sampler: str = "metropolis") -> None:
 
     # Analysis
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if result.idata is not None:
+        result.idata.to_netcdf(out_dir / "idata.nc")
+
     chain = result.chain
 
     np.savetxt(out_dir / "samples.csv", chain, delimiter=",", header="N,m,J,C")

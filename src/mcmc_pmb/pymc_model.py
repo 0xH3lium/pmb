@@ -210,4 +210,5 @@ def run_sampler(
         accepted=accepted,
         burn_in=burn_in,
         thinning=thinning,
+        idata=idata,
     )
