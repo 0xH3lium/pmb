@@ -12,7 +12,8 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 import pandas as pd
 import arviz as az
-from pytensor import config as pt_config
+import pytensor.tensor as pt
+from pytensor import config as pt_config, function
 
 from .forward_model import ProductionDataset, prepare_production_dataset
 
@@ -50,11 +51,26 @@ def _apply_style():
     plt.rcParams.update(STYLE_CONFIG)
 
 
+def _flatten_posterior_variable(idata: Any, var_name: str) -> np.ndarray | None:
+    """Return posterior variable flattened as (samples, ...), or None if unavailable."""
+    if idata is None or not hasattr(idata, "posterior"):
+        return None
+    if var_name not in idata.posterior:
+        return None
+
+    values = np.asarray(idata.posterior[var_name].values)
+    if values.ndim < 2:
+        return None
+
+    return values.reshape(-1, *values.shape[2:])
+
+
 def plot_posterior_predictive(
     chain: np.ndarray,
     model: Any,
     production_data: pd.DataFrame | ProductionDataset,
     output_dir: Path,
+    idata: Any | None = None,
     n_curves: int = 500,
 ) -> None:
     """
@@ -64,7 +80,17 @@ def plot_posterior_predictive(
     """
     _apply_style()
     dataset = prepare_production_dataset(production_data)
-    n_samples = chain.shape[0]
+    chain_for_plot = chain
+
+    theta_from_idata = _flatten_posterior_variable(idata, "theta")
+    if (
+        theta_from_idata is not None
+        and theta_from_idata.ndim == 2
+        and theta_from_idata.shape[1] == 4
+    ):
+        chain_for_plot = theta_from_idata
+
+    n_samples = chain_for_plot.shape[0]
     if n_samples == 0:
         return
 
@@ -72,13 +98,46 @@ def plot_posterior_predictive(
     rng = np.random.default_rng()
     indices = rng.choice(n_samples, size=min(n_curves, n_samples), replace=False)
 
-    predict_fn = model.make_predict_function(dataset)
+    Np_true_samples = _flatten_posterior_variable(idata, "Np_true")
+    Rp_true_samples = _flatten_posterior_variable(idata, "Rp_true")
+    use_latent_sequences = (
+        Np_true_samples is not None
+        and Rp_true_samples is not None
+        and Np_true_samples.shape[0] == n_samples
+        and Rp_true_samples.shape[0] == n_samples
+        and Np_true_samples.ndim == 2
+        and Rp_true_samples.ndim == 2
+        and Np_true_samples.shape[1] == dataset.n_steps
+        and Rp_true_samples.shape[1] == dataset.n_steps
+    )
+
+    if use_latent_sequences:
+        theta = pt.vector("theta", dtype=pt_config.floatX)
+        np_seq = pt.vector("Np_seq", dtype=pt_config.floatX)
+        rp_seq = pt.vector("Rp_seq", dtype=pt_config.floatX)
+        pressures = model.symbolic_pressures(
+            theta[0],
+            theta[1],
+            theta[2],
+            theta[3],
+            dataset,
+            Np_seq=np_seq,
+            Rp_seq=rp_seq,
+        )
+        predict_fn = function([theta, np_seq, rp_seq], pressures)
+    else:
+        predict_fn = model.make_predict_function(dataset)
 
     # Generate ensemble predictions
     preds = np.empty((len(indices), dataset.n_steps))
     for i, idx in enumerate(indices):
-        theta = chain[idx].astype(pt_config.floatX)
-        preds[i] = predict_fn(theta)
+        theta = chain_for_plot[idx].astype(pt_config.floatX)
+        if use_latent_sequences:
+            np_true = Np_true_samples[idx].astype(pt_config.floatX)
+            rp_true = Rp_true_samples[idx].astype(pt_config.floatX)
+            preds[i] = predict_fn(theta, np_true, rp_true)
+        else:
+            preds[i] = predict_fn(theta)
 
     # Calculate Statistics (Median, 50% CI, 95% CI)
     p50 = np.median(preds, axis=0)

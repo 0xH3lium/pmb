@@ -153,7 +153,7 @@ class MaterialBalanceModel:
         """Return PyTensor graph for predicted pressures given symbolic parameters."""
 
         dtype = pt_config.floatX
-        # Allow overriding production sequences with latent variables for EIV modeling
+        # Allow overriding production sequences with latent variables
         Np = (
             pt.as_tensor_variable(dataset.Np.astype(dtype))
             if Np_seq is None

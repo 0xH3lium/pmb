@@ -82,7 +82,6 @@ def run_scenario_ppc(
         model=model,
         sigma=100.0,
         sampler_type="nuts",
-        use_eiv=False,
     )
 
     chain = result.chain

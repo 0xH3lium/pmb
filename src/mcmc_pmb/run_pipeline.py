@@ -88,7 +88,7 @@ def main(sampler: str = "metropolis") -> None:
 
     make_diagnostics(chain, out_dir, result.log_posteriors_chain, map_est)
 
-    plot_posterior_predictive(chain, model, dataset, out_dir)
+    plot_posterior_predictive(chain, model, dataset, out_dir, idata=result.idata)
 
     print(f"\nSampler: {sampler}")
     print(f"Acceptance: {result.acceptance_rate:.2%}")

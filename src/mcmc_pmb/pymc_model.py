@@ -23,7 +23,6 @@ def _build_pymc_model(
     dataset: ProductionDataset,
     model: MaterialBalanceModel,
     sigma: float,
-    use_eiv: bool = True,
 ) -> pm.Model:
     rho = float(np.clip(prior.correlation, -0.999, 0.999))
     sigma_m_cond = float(prior.std_m * np.sqrt(1.0 - rho**2))
@@ -47,46 +46,7 @@ def _build_pymc_model(
         theta = pm.Deterministic("theta", pt.stack([N, m, J, C]))
         pm.Deterministic("theta_raw", pt.stack([N, m, log_J, log_C]))
 
-        if use_eiv:
-            n_steps = dataset.n_steps
-
-            dNp_obs = np.diff(np.concatenate(([0.0], dataset.Np)))
-            dNp_mu = np.maximum(dNp_obs, 1e-6)
-            dNp_true = pm.LogNormal(
-                "dNp_true",
-                mu=pt.as_tensor_variable(np.log(dNp_mu)),
-                sigma=0.05,
-                shape=n_steps,
-            )
-            Np_true = pm.Deterministic("Np_true", pt.cumsum(dNp_true))
-            pm.Normal(
-                "Np_obs",
-                mu=Np_true,
-                sigma=pt.as_tensor_variable(
-                    np.maximum(np.abs(dataset.Np) * 0.05, 1e-6)
-                ),
-                observed=dataset.Np,
-            )
-
-            Rp_mu = np.maximum(dataset.Rp, 1e-6)
-            Rp_true = pm.LogNormal(
-                "Rp_true",
-                mu=pt.as_tensor_variable(np.log(Rp_mu)),
-                sigma=0.05,
-                shape=n_steps,
-            )
-            pm.Normal(
-                "Rp_obs",
-                mu=Rp_true,
-                sigma=pt.as_tensor_variable(np.maximum(dataset.Rp * 0.05, 1e-6)),
-                observed=dataset.Rp,
-            )
-
-            pressures = model.symbolic_pressures(
-                theta[0], theta[1], J, C, dataset, Np_seq=Np_true, Rp_seq=Rp_true
-            )
-        else:
-            pressures = model.symbolic_pressures(theta[0], theta[1], J, C, dataset)
+        pressures = model.symbolic_pressures(theta[0], theta[1], J, C, dataset)
 
         # Robust likelihood via StudentT
         nu = pm.Exponential("nu", 1 / 5)
@@ -108,10 +68,9 @@ def run_sampler(
     model: MaterialBalanceModel,
     sigma: float,
     sampler_type: str = "nuts",
-    use_eiv: bool = True,
 ) -> MetropolisHastingsResult:
     dataset = prepare_production_dataset(data)
-    pm_model = _build_pymc_model(prior, dataset, model, sigma, use_eiv=use_eiv)
+    pm_model = _build_pymc_model(prior, dataset, model, sigma)
 
     with pm_model:
         if sampler_type == "nuts":
