@@ -35,7 +35,7 @@ def generate_synthetic_dataset(
     output_csv: Optional[Path] = None,
     n_steps: int = 24,
     true_parameters: tuple[float, float] = (110.0, 0.35),
-    measurement_noise: float = 50.0,
+    measurement_noise: float = 20.0,
     gas_prod_coefficient: float = 0.6,
     random_seed: int = 2026,
     max_prod: float = 12.0e6,  # CHANGED: 12 Million STB (approx 10% recovery)

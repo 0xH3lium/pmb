@@ -13,6 +13,10 @@ dependencies = [
 	"ipykernel>=7.1.0",
 	"pymc>=5.26.1",
 	"numba",
+	"numpyro==0.15.2",
+	"tensorflow-probability==0.24.0",
+	"jax==0.4.30",
+	"jaxlib==0.4.30",
 ]
 
 [build-system]

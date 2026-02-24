@@ -81,6 +81,7 @@ def run_sampler(
                 target_accept=config.target_accept,
                 random_seed=config.random_seed,
                 progressbar=True,
+                nuts_sampler='numpyro'
             )
             raw_chain = idata.posterior["theta"].values.reshape(-1, 4)
             theta_raw_chain = idata.posterior["theta_raw"].values.reshape(-1, 4)
