@@ -10,6 +10,7 @@ from .analysis import (
     make_diagnostics,
     summarize_chain,
     plot_posterior_predictive,
+    plot_probabilistic_drive_indices
 )
 from .forward_model import MaterialBalanceModel, prepare_production_dataset
 from .mcmc import MetropolisHastingsConfig, NUTSConfig
@@ -87,6 +88,7 @@ def main(sampler: str = "metropolis") -> None:
     summary.to_csv(out_dir / "summary.csv", index=False)
 
     make_diagnostics(chain, out_dir, result.log_posteriors_chain, map_est)
+    plot_probabilistic_drive_indices(chain, model, dataset, out_dir)
 
     plot_posterior_predictive(chain, model, dataset, out_dir, idata=result.idata)
 

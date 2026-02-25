@@ -530,6 +530,21 @@ wheels = [
 ]
 
 [[package]]
+name = "joypy"
+version = "0.2.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/89/f4/49636d4c5fa30822028a1e2af234cecf488ba3c7e9ff5aba88e36fb0c95c/joypy-0.2.6.tar.gz", hash = "sha256:099da2d6c7d81b5eccc957bd9446831f565ba42d5abbab0fa92b81892449522e", size = 10270, upload-time = "2021-12-19T09:42:52.541Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/8c/4d32c8935431eb10fd140faa4b13b6b8de222223a88fa9ad2a7711b7f1a9/joypy-0.2.6-py2.py3-none-any.whl", hash = "sha256:fffe882e8281e56e08b374a3148436cb448562ba39e4d566204c7e8ee2caddab", size = 8584, upload-time = "2021-12-19T09:42:50.786Z" },
+]
+
+[[package]]
 name = "jupyter-client"
 version = "8.6.3"
 source = { registry = "https://pypi.org/simple" }
@@ -747,6 +762,7 @@ dependencies = [
     { name = "ipykernel" },
     { name = "jax" },
     { name = "jaxlib" },
+    { name = "joypy" },
     { name = "matplotlib" },
     { name = "numba" },
     { name = "numpy" },
@@ -763,6 +779,7 @@ requires-dist = [
     { name = "ipykernel", specifier = ">=7.1.0" },
     { name = "jax", specifier = "==0.4.30" },
     { name = "jaxlib", specifier = "==0.4.30" },
+    { name = "joypy", specifier = ">=0.2.6" },
     { name = "matplotlib" },
     { name = "numba" },
     { name = "numpy" },

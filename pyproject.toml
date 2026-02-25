@@ -17,6 +17,7 @@ dependencies = [
 	"tensorflow-probability==0.24.0",
 	"jax==0.4.30",
 	"jaxlib==0.4.30",
+	"joypy>=0.2.6",
 ]
 
 [build-system]

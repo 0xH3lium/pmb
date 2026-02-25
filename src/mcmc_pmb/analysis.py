@@ -320,3 +320,88 @@ def make_diagnostics(
 
         fig.savefig(output_dir / "log_posterior_convergence.png", bbox_inches="tight")
         plt.close(fig)
+
+
+def plot_probabilistic_drive_indices(
+    chain: np.ndarray,
+    model: Any,
+    production_data: pd.DataFrame | ProductionDataset,
+    output_dir: Path,
+    n_curves: int = 500,
+) -> None:
+    """
+    Computes Probabilistic Drive Indices (DDI, SDI, WDI, EDI)
+    to visualize the uncertainty of reservoir energy sources over time.
+    """
+    _apply_style()
+    dataset = prepare_production_dataset(production_data)
+    predict_fn = model.make_predict_function(dataset)
+
+    n_samples = chain.shape[0]
+    indices = np.random.choice(n_samples, size=min(n_curves, n_samples), replace=False)
+
+    ddi_all, sdi_all, wdi_all, edi_all = [], [], [], []
+
+    for idx in indices:
+        theta = chain[idx]
+        N, m, J, C = theta[:4]
+        N_stb = N * 1.0e6
+
+        pi = model._context.initial_pressure
+        boi, bgi, rsi = model._context.Boi, model._context.Bgi, model._context.Rsi
+        ceff = model._context.eff_compressibility
+
+        pressures = predict_fn(theta.astype(pt_config.floatX))
+        bo, _ = model.pvt_engine.oil_fvf_numpy(pressures)
+        bg, _ = model.pvt_engine.gas_fvf_numpy(pressures)
+        rs, _ = model.pvt_engine.solution_gor_numpy(pressures)
+
+        rhs_fluid = N_stb * ((bo - boi) + (rsi - rs) * bg)
+        rhs_gas = N_stb * m * boi * ((bg / bgi) - 1.0)
+        comp_term = N_stb * boi * (1.0 + m) * ceff * np.maximum(pi - pressures, 0.0)
+
+        we_total = np.zeros(dataset.n_steps)
+        we_prev = 0.0
+        for i in range(1, dataset.n_steps):
+            dt = dataset.step_days[i]
+            p_a_prev = pi - we_prev / max(C, 1e-6)
+            decline = np.exp(-J * dt / max(C, 1e-6))
+            p_a_new = pressures[i] + (p_a_prev - pressures[i]) * decline
+            we_total[i] = we_prev + C * (p_a_prev - p_a_new)
+            we_prev = we_total[i]
+
+        total_exp = np.maximum(rhs_fluid + rhs_gas + comp_term + we_total, 1e-6)
+
+        ddi_all.append(rhs_fluid / total_exp)
+        sdi_all.append(rhs_gas / total_exp)
+        wdi_all.append(we_total / total_exp)
+        edi_all.append(comp_term / total_exp)
+
+    t = dataset.time_days
+    fig, axes = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
+    drives = [
+        ("Depletion Drive (DDI)", ddi_all, "#22c55e"),
+        ("Water Drive (WDI)", wdi_all, "#3b82f6"),
+        ("Gas Cap Drive (SDI)", sdi_all, "#ef4444"),
+        ("Compaction/Rock (EDI)", edi_all, "#64748b"),
+    ]
+
+    for ax, (title, data, color) in zip(axes, drives):
+        data_arr = np.array(data)
+        p50 = np.median(data_arr, axis=0)
+        p05 = np.percentile(data_arr, 5, axis=0)
+        p95 = np.percentile(data_arr, 95, axis=0)
+
+        ax.fill_between(t[1:], p05[1:], p95[1:], color=color, alpha=0.3, label="90% CI")
+        ax.plot(t[1:], p50[1:], color=color, lw=2, label="Median")
+
+        ax.set_ylim(0, 1)
+        ax.set_ylabel("Fraction")
+        ax.set_title(title, fontweight="bold")
+        ax.legend(loc="upper right")
+
+    axes[-1].set_xlabel("Time (days)")
+    plt.tight_layout()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_dir / "probabilistic_drive_indices.png", bbox_inches="tight")
+    plt.close(fig)
