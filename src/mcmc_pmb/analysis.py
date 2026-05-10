@@ -405,3 +405,116 @@ def plot_probabilistic_drive_indices(
     output_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_dir / "probabilistic_drive_indices.png", bbox_inches="tight")
     plt.close(fig)
+
+def plot_N_m_joint(
+    chain: np.ndarray,
+    output_dir: Path,
+    parameter_names: Sequence[str] = ("N", "m", "J", "C"),
+) -> None:
+    """
+    Generates a high-quality 2D joint plot of parameters $N$ and $m$.
+    Uses a hexbin plot to handle high-density MCMC samples effectively.
+    """
+    _apply_style()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Extract N and m assuming standard ordering
+    idx_N = parameter_names.index("N")
+    idx_m = parameter_names.index("m")
+    
+    N_samples = chain[:, idx_N]
+    m_samples = chain[:, idx_m]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    
+    # Hexbin plot for density
+    hb = ax.hexbin(
+        N_samples, 
+        m_samples, 
+        gridsize=50, 
+        cmap="Blues", 
+        mincnt=1,
+        alpha=0.9
+    )
+    
+    cb = fig.colorbar(hb, ax=ax)
+    cb.set_label("Sample Density")
+
+    ax.set_xlabel("Original Oil in Place ($N$)")
+    ax.set_ylabel("Gas Cap Ratio ($m$)")
+    ax.set_title("Joint Posterior Density: $N$ vs $m$", fontweight="bold")
+    
+    # Add median marker
+    ax.scatter(
+        np.median(N_samples), 
+        np.median(m_samples), 
+        color=COLORS["residual"], 
+        marker="X", 
+        s=100, 
+        label="Median",
+        edgecolor="white",
+        linewidth=1.5
+    )
+    ax.legend(loc="upper right")
+
+    fig.savefig(output_dir / "joint_N_m.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_N_m_J_3d(
+    chain: np.ndarray,
+    output_dir: Path,
+    parameter_names: Sequence[str] = ("N", "m", "J", "C"),
+    n_points: int = 2000,
+) -> None:
+    """
+    Generates a 3D scatter plot of the joint posterior for $N$, $m$, and $J$.
+    Subsamples the chain for rendering performance.
+    """
+    _apply_style()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    idx_N = parameter_names.index("N")
+    idx_m = parameter_names.index("m")
+    idx_J = parameter_names.index("J")
+
+    # Subsample for 3D plot clarity
+    n_samples = chain.shape[0]
+    if n_samples > n_points:
+        indices = np.random.choice(n_samples, size=n_points, replace=False)
+        chain_sub = chain[indices]
+    else:
+        chain_sub = chain
+
+    N_samples = chain_sub[:, idx_N]
+    m_samples = chain_sub[:, idx_m]
+    J_samples = chain_sub[:, idx_J]
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Color by depth (J parameter) to enhance 3D perception
+    sc = ax.scatter(
+        N_samples, 
+        m_samples, 
+        J_samples, 
+        c=J_samples, 
+        cmap="viridis", 
+        alpha=0.5,
+        s=15,
+        edgecolor='none'
+    )
+
+    cb = fig.colorbar(sc, ax=ax, pad=0.1, shrink=0.7)
+    cb.set_label("Productivity Index ($J$)")
+
+    ax.set_xlabel("Original Oil in Place ($N$)")
+    ax.set_ylabel("Gas Cap Ratio ($m$)")
+    ax.set_zlabel("Productivity Index ($J$)")
+    ax.set_title("3D Joint Posterior: $N$, $m$, and $J$", fontweight="bold")
+
+    # Adjust viewing angle
+    ax.view_init(elev=25, azim=45)
+
+    fig.savefig(output_dir / "joint_3d_N_m_J.png", bbox_inches="tight")
+    plt.close(fig)

@@ -33,8 +33,8 @@ def _calculate_instantaneous_gor(
 
 def generate_synthetic_dataset(
     output_csv: Optional[Path] = None,
-    n_steps: int = 24,
-    true_parameters: tuple[float, float] = (110.0, 0.35),
+    n_steps: int = 30,
+    true_parameters: tuple[float, float] = (110.0, 0.6),
     measurement_noise: float = 20.0,
     gas_prod_coefficient: float = 0.6,
     random_seed: int = 2026,

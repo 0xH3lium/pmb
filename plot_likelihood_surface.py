@@ -32,7 +32,7 @@ production_data = generate_synthetic_dataset(
     aquifer_J=AQUIFER_J,
     aquifer_C=AQUIFER_C,
     measurement_noise=MEASUREMENT_NOISE,
-    random_seed=1244,
+    random_seed=65454,
 )
 
 # Build the forward model with the same aquifer settings used to create the data.
@@ -118,7 +118,7 @@ mh_config = MetropolisHastingsConfig(
     n_iterations=200,
     burn_in=0,
     thinning=1,
-    proposal_std=(3.0, 0.03, 0.3, 0.3),
+    proposal_std=(3.0, 20.0, 3.0, 3.0),
     use_adaptive=False,
 )
 mh_result = run_sampler(mh_config, prior, dataset, model, MEASUREMENT_NOISE, sampler_type="metropolis")

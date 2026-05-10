@@ -10,7 +10,9 @@ from .analysis import (
     make_diagnostics,
     summarize_chain,
     plot_posterior_predictive,
-    plot_probabilistic_drive_indices
+    plot_probabilistic_drive_indices,
+    plot_N_m_J_3d,
+    plot_N_m_joint
 )
 from .forward_model import MaterialBalanceModel, prepare_production_dataset
 from .mcmc import MetropolisHastingsConfig, NUTSConfig
@@ -91,6 +93,9 @@ def main(sampler: str = "metropolis") -> None:
     plot_probabilistic_drive_indices(chain, model, dataset, out_dir)
 
     plot_posterior_predictive(chain, model, dataset, out_dir, idata=result.idata)
+
+    plot_N_m_joint(chain,out_dir)
+    plot_N_m_J_3d(chain,out_dir)
 
     print(f"\nSampler: {sampler}")
     print(f"Acceptance: {result.acceptance_rate:.2%}")

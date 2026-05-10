@@ -106,6 +106,7 @@ def run_sampler(
                 progressbar=True,
                 random_seed=config.random_seed,
                 discard_tuned_samples=discard_tuned_samples,
+                
             )
 
             raw_chain = idata.posterior["theta"].values.reshape(-1, 4)
